@@ -26,6 +26,7 @@ function toInt(value, fallback, { min = 1 } = {}) {
 export function loadConfig(env = process.env) {
   const domains = parseDomainList(env.DOMAINS);
   const ttlMinutes = toInt(env.MAILBOX_TTL_MINUTES, 30);
+  const maxMailboxLifetimeMinutes = toInt(env.MAX_MAILBOX_LIFETIME_MINUTES, ttlMinutes * 4);
 
   return {
     env: env.NODE_ENV || 'development',
@@ -45,9 +46,15 @@ export function loadConfig(env = process.env) {
     domains,
     ttlMinutes,
     ttlMs: ttlMinutes * 60 * 1000,
-    maxMailboxesPerSession: toInt(env.MAX_MAILBOXES_PER_SESSION, 10),
+    maxMailboxesPerSession: toInt(env.MAX_MAILBOXES_PER_SESSION, 5),
+    // Hard ceiling on how long a single mailbox may live, however often it is
+    // extended. Defaults to 4x the base TTL.
+    maxMailboxLifetimeMinutes,
+    maxMailboxLifetimeMs: maxMailboxLifetimeMinutes * 60 * 1000,
     sweepIntervalMs: toInt(env.SWEEP_INTERVAL_MS, 60 * 1000),
     randomLocalPartLength: toInt(env.RANDOM_LOCAL_PART_LENGTH, 10),
+    // Polling fallback used by the client when the WebSocket is unavailable.
+    pollIntervalMs: toInt(env.POLL_INTERVAL_MS, 8000),
 
     createRateLimit: {
       windowMs: toInt(env.CREATE_RATE_LIMIT_WINDOW_MS, 10 * 60 * 1000),
