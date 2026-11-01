@@ -152,3 +152,112 @@ test('store.sweep evicts expired mailboxes', async () => {
   assert.equal(store.sweep(mailbox.expiresAt + 1).length, 1);
   assert.equal(store.has('temp@a.test'), false);
 });
+
+test('GET /api/domains returns the configured domain list', async () => {
+  const { app } = makeSetup();
+  const res = await request(app).get('/api/domains');
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.domains, ['a.test', 'b.test']);
+});
+
+test('GET /api/config exposes the polling interval and limits', async () => {
+  const { app } = makeSetup();
+  const res = await request(app).get('/api/config');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.pollIntervalMs, 8000);
+  assert.equal(res.body.maxMailboxesPerSession, 3);
+  assert.equal(res.body.maxMailboxLifetimeMinutes, 40);
+});
+
+test('POST /api/mailboxes with no domain picks a random allowed domain', async () => {
+  const { app } = makeSetup({ MAX_MAILBOXES_PER_SESSION: '100' });
+  const seen = new Set();
+  for (let i = 0; i < 20; i += 1) {
+    const res = await request(app)
+      .post('/api/mailboxes')
+      .set('x-session-id', SESSION)
+      .send({});
+    assert.equal(res.status, 201);
+    const domain = res.body.address.split('@')[1];
+    assert.ok(['a.test', 'b.test'].includes(domain), `unexpected domain ${domain}`);
+    seen.add(domain);
+  }
+  // With 20 draws the chance of missing a domain is negligible (~2^-19).
+  assert.deepEqual([...seen].sort(), ['a.test', 'b.test']);
+});
+
+test('POST /api/mailboxes/:address/extend pushes the expiry forward', async () => {
+  const { app } = makeSetup();
+  const created = await request(app)
+    .post('/api/mailboxes')
+    .set('x-session-id', SESSION)
+    .send({ domain: 'a.test', localPart: 'extendme' });
+  assert.equal(created.status, 201);
+
+  const res = await request(app)
+    .post(`/api/mailboxes/${encodeURIComponent(created.body.address)}/extend`)
+    .set('x-session-id', SESSION);
+  assert.equal(res.status, 200);
+  assert.ok(res.body.mailbox.expiresAt > created.body.expiresAt);
+  assert.equal(res.body.mailbox.extendCount, 1);
+});
+
+test('extend never exceeds MAX_MAILBOX_LIFETIME_MINUTES', async () => {
+  const { store } = makeSetup({ MAILBOX_TTL_MINUTES: '10', MAX_MAILBOX_LIFETIME_MINUTES: '30' });
+  const mailbox = store.createMailbox({
+    address: 'capped@a.test',
+    localPart: 'capped',
+    domain: 'a.test',
+    sessionId: SESSION,
+  });
+
+  // Pretend the mailbox is 25 minutes old and nearly expired: now + TTL would
+  // overshoot the 30-minute hard cap, so the cap must win.
+  mailbox.createdAt = Date.now() - 25 * 60 * 1000;
+  mailbox.expiresAt = mailbox.createdAt + 10 * 60 * 1000; // 15 min ago
+  const capped = store.extendMailbox('capped@a.test', {
+    ttlMs: 10 * 60 * 1000,
+    maxLifetimeMs: 30 * 60 * 1000,
+  });
+  assert.equal(capped.expiresAt, mailbox.createdAt + 30 * 60 * 1000);
+  const cap = capped.expiresAt;
+
+  // At the cap, further extends are no-ops.
+  const again = store.extendMailbox('capped@a.test', {
+    ttlMs: 10 * 60 * 1000,
+    maxLifetimeMs: 30 * 60 * 1000,
+  });
+  assert.equal(again.expiresAt, cap);
+});
+
+test('extend refuses another session mailbox', async () => {
+  const { app } = makeSetup();
+  const created = await request(app)
+    .post('/api/mailboxes')
+    .set('x-session-id', SESSION)
+    .send({ domain: 'a.test', localPart: 'notmine' });
+  const res = await request(app)
+    .post(`/api/mailboxes/${encodeURIComponent(created.body.address)}/extend`)
+    .set('x-session-id', 'intruder-session-1');
+  assert.equal(res.status, 404);
+});
+
+test('GET /api/mailboxes/:address/qr returns an SVG data URL', async () => {
+  const { app } = makeSetup();
+  const created = await request(app)
+    .post('/api/mailboxes')
+    .set('x-session-id', SESSION)
+    .send({ domain: 'a.test', localPart: 'qrcode' });
+
+  const res = await request(app)
+    .get(`/api/mailboxes/${encodeURIComponent(created.body.address)}/qr`)
+    .set('x-session-id', SESSION);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.address, created.body.address);
+  assert.match(res.body.dataUrl, /^data:image\/svg\+xml;base64,/);
+
+  const denied = await request(app)
+    .get(`/api/mailboxes/${encodeURIComponent(created.body.address)}/qr`)
+    .set('x-session-id', 'intruder-session-1');
+  assert.equal(denied.status, 404);
+});

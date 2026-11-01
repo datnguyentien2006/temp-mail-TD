@@ -5,10 +5,12 @@ import { createApp } from '../src/app.js';
 export const TEST_ENV = {
   DOMAINS: 'a.test,b.test',
   MAILBOX_TTL_MINUTES: '10',
+  MAX_MAILBOX_LIFETIME_MINUTES: '40',
   MAX_MAILBOXES_PER_SESSION: '3',
   CREATE_RATE_LIMIT_MAX: '1000',
   CREATE_RATE_LIMIT_WINDOW_MS: '60000',
   RANDOM_LOCAL_PART_LENGTH: '10',
+  POLL_INTERVAL_MS: '8000',
 };
 
 export const SESSION = 'session-test-0001';
