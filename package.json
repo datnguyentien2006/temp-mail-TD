@@ -1,0 +1,35 @@
+{
+  "name": "temp-mail",
+  "version": "1.0.0",
+  "description": "Disposable temp-mail web app: generate throwaway addresses on demand and receive replies sent to them.",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "temp-mail",
+    "disposable-email",
+    "smtp",
+    "express"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "mailparser": "^3.7.1",
+    "sanitize-html": "^2.14.0",
+    "smtp-server": "^3.13.6",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "nodemailer": "^6.9.15",
+    "supertest": "^7.0.0"
+  }
+}
