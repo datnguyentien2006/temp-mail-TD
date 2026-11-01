@@ -3,34 +3,48 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Temp Mail — disposable inbox</title>
+  <title>Temp Mail - disposable inbox</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">📬 Temp&nbsp;Mail</div>
-    <form id="createForm" class="newmail" autocomplete="off">
+    <form id="createForm" class="newmail" autocomplete="off" novalidate>
       <select id="domainSelect" aria-label="Domain"></select>
-      <input id="localPartInput" type="text" placeholder="custom name (optional)" maxlength="64" />
+      <input id="localPartInput" type="text" placeholder="custom name (optional)"
+             maxlength="64" spellcheck="false" autocapitalize="off" aria-label="Custom username" />
       <button id="newBtn" type="submit">New address</button>
     </form>
   </header>
 
   <main>
     <aside class="sidebar">
-      <h2>Your addresses</h2>
+      <h2>
+        Active inboxes
+        <span id="mailboxCount" class="count-pill">0/0</span>
+      </h2>
       <ul id="mailboxList" class="mailbox-list"></ul>
-      <p id="sidebarHint" class="hint">No addresses yet — create one above.</p>
+      <p id="sidebarHint" class="hint">No addresses yet - create one above.</p>
+
+      <h2>Recent addresses</h2>
+      <ul id="historyList" class="history-list"></ul>
+      <p id="historyHint" class="hint">Addresses you create appear here.</p>
     </aside>
 
     <section class="content">
+      <div id="tabs" class="tabs" role="tablist" aria-label="Open inboxes"></div>
+
       <div class="addressbar">
         <span id="currentAddress" class="addr">No address selected</span>
-        <button id="copyBtn" type="button" disabled>Copy</button>
+        <div class="actions">
+          <button id="copyBtn" type="button" class="ghost" disabled>Copy</button>
+          <button id="qrBtn" type="button" class="ghost" disabled>QR</button>
+          <button id="extendBtn" type="button" class="ghost" disabled>Extend</button>
+        </div>
         <span id="ttl" class="ttl"></span>
       </div>
 
-      <div id="status" class="status" role="status"></div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
 
       <div class="inbox">
         <ul id="messageList" class="messages"></ul>
@@ -38,6 +52,19 @@
       </div>
     </section>
   </main>
+
+  <div id="qrModal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Address QR code">
+      <div class="modal-head">
+        <strong>Scan to send to this address</strong>
+        <button id="qrClose" type="button" class="ghost" aria-label="Close">✕</button>
+      </div>
+      <div class="qr-body">
+        <img id="qrImage" alt="QR code for the current address" />
+        <p id="qrAddress" class="addr"></p>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

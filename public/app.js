@@ -1,17 +1,28 @@
-/* Temp Mail frontend — vanilla JS, no build step. */
+/* Temp Mail frontend - vanilla JS, no build step.
+ *
+ * Talks to the same-origin REST API with an `x-session-id` header and listens
+ * on the WebSocket for live updates, falling back to polling when it is down.
+ */
 
 const SESSION_KEY = 'tempmail.sessionId';
-const POLL_INTERVAL_MS = 8000;
+const HISTORY_KEY = 'tempmail.history';
+const HISTORY_MAX = 20;
+const RANDOM_DOMAIN = ''; // empty option value => let the server pick
 
 const state = {
   sessionId: getSessionId(),
   domains: [],
   ttlMinutes: 30,
+  maxMailboxLifetimeMinutes: 120,
+  maxMailboxes: 5,
+  pollIntervalMs: 8000,
   mailboxes: [],
   currentAddress: null,
   messages: [],
   currentMessageId: null,
+  history: loadHistory(),
   socket: null,
+  socketRetry: 0,
 };
 
 const el = {
@@ -20,15 +31,26 @@ const el = {
   localPartInput: document.getElementById('localPartInput'),
   newBtn: document.getElementById('newBtn'),
   mailboxList: document.getElementById('mailboxList'),
+  mailboxCount: document.getElementById('mailboxCount'),
   sidebarHint: document.getElementById('sidebarHint'),
+  historyList: document.getElementById('historyList'),
+  historyHint: document.getElementById('historyHint'),
+  tabs: document.getElementById('tabs'),
   currentAddress: document.getElementById('currentAddress'),
   copyBtn: document.getElementById('copyBtn'),
+  qrBtn: document.getElementById('qrBtn'),
+  extendBtn: document.getElementById('extendBtn'),
   ttl: document.getElementById('ttl'),
   status: document.getElementById('status'),
   messageList: document.getElementById('messageList'),
   messageView: document.getElementById('messageView'),
+  qrModal: document.getElementById('qrModal'),
+  qrImage: document.getElementById('qrImage'),
+  qrAddress: document.getElementById('qrAddress'),
+  qrClose: document.getElementById('qrClose'),
 };
 
+/* --------------------------------------------------------------- utils */
 function getSessionId() {
   let id = localStorage.getItem(SESSION_KEY);
   if (!id) {
@@ -38,9 +60,61 @@ function getSessionId() {
   return id;
 }
 
-function setStatus(text, isError = false) {
+function loadHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    return Array.isArray(raw) ? raw.filter((a) => typeof a === 'string').slice(0, HISTORY_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory() {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, HISTORY_MAX)));
+  } catch { /* storage may be unavailable - non-fatal */ }
+}
+
+function rememberAddress(address) {
+  state.history = [address, ...state.history.filter((a) => a !== address)].slice(0, HISTORY_MAX);
+  saveHistory();
+  renderHistory();
+}
+
+function forgetAddress(address) {
+  state.history = state.history.filter((a) => a !== address);
+  saveHistory();
+  renderHistory();
+}
+
+function setStatus(text, kind = '') {
   el.status.textContent = text || '';
-  el.status.classList.toggle('error', Boolean(isError));
+  el.status.className = `status${kind ? ` ${kind}` : ''}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+function formatTime(ts) {
+  return new Date(Number(ts) || Date.now()).toLocaleString();
+}
+
+function relativeTime(ts) {
+  const diff = Date.now() - Number(ts);
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return formatTime(ts);
+}
+
+function splitAddress(address) {
+  const at = String(address).indexOf('@');
+  return at < 0
+    ? { local: address, domain: '' }
+    : { local: address.slice(0, at), domain: address.slice(at + 1) };
 }
 
 async function api(path, options = {}) {
@@ -58,79 +132,76 @@ async function api(path, options = {}) {
   return data;
 }
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[c]);
-}
-
-function formatTime(ts) {
-  const d = new Date(Number(ts) || Date.now());
-  return d.toLocaleString();
-}
-
-function relativeTime(ts) {
-  const diff = Date.now() - Number(ts);
-  if (diff < 60000) return 'just now';
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-  return formatTime(ts);
-}
-
-/* ------------------------------------------------------------------ init */
+/* ---------------------------------------------------------------- init */
 async function init() {
   try {
     const cfg = await api('/api/config');
     state.domains = cfg.domains || [];
     state.ttlMinutes = cfg.ttlMinutes || 30;
-    renderDomains();
+    state.maxMailboxLifetimeMinutes = cfg.maxMailboxLifetimeMinutes || state.ttlMinutes * 4;
+    state.maxMailboxes = cfg.maxMailboxesPerSession || 5;
+    state.pollIntervalMs = cfg.pollIntervalMs || 8000;
+    renderDomainOptions();
   } catch (err) {
-    setStatus(`Could not load config: ${err.message}`, true);
+    setStatus(`Could not load config: ${err.message}`, 'error');
   }
   await refreshMailboxes();
   connectSocket();
   setInterval(tickTtl, 1000);
-  setInterval(pollFallback, POLL_INTERVAL_MS);
+  setInterval(pollFallback, state.pollIntervalMs);
+  updateCreateAvailability();
 }
 
-function renderDomains() {
+function renderDomainOptions() {
   el.domainSelect.innerHTML = '';
-  if (state.domains.length === 0) {
-    const opt = document.createElement('option');
-    opt.textContent = 'no domains configured';
-    opt.disabled = true;
-    el.domainSelect.appendChild(opt);
-    el.newBtn.disabled = true;
-    setStatus('No domains configured on the server (set DOMAINS).', true);
-    return;
-  }
+
+  const random = document.createElement('option');
+  random.value = RANDOM_DOMAIN;
+  random.textContent = 'Random domain';
+  el.domainSelect.appendChild(random);
+
   for (const domain of state.domains) {
     const opt = document.createElement('option');
     opt.value = domain;
     opt.textContent = domain;
     el.domainSelect.appendChild(opt);
   }
+
+  if (state.domains.length === 0) {
+    el.newBtn.disabled = true;
+    setStatus('No domains configured on the server (set DOMAINS).', 'error');
+  }
 }
 
-/* ----------------------------------------------------- mailbox lifecycle */
+function updateCreateAvailability() {
+  const full = state.mailboxes.length >= state.maxMailboxes;
+  el.newBtn.disabled = state.domains.length === 0 || full;
+  el.mailboxCount.textContent = `${state.mailboxes.length}/${state.maxMailboxes}`;
+  if (full) {
+    setStatus(`Limit reached (${state.maxMailboxes} active inboxes). Delete one to create another.`);
+  }
+}
+
+/* ---------------------------------------------------- mailbox lifecycle */
 el.form.addEventListener('submit', async (event) => {
   event.preventDefault();
   el.newBtn.disabled = true;
-  setStatus('Creating mailbox…');
+  setStatus('Creating address...');
   try {
     const localPart = el.localPartInput.value.trim();
-    const mailbox = await api('/api/mailboxes', {
-      method: 'POST',
-      body: JSON.stringify({ domain: el.domainSelect.value, localPart: localPart || undefined }),
-    });
+    const payload = { domain: el.domainSelect.value };
+    if (localPart) payload.localPart = localPart;
+
+    const mailbox = await api('/api/mailboxes', { method: 'POST', body: JSON.stringify(payload) });
     el.localPartInput.value = '';
+    rememberAddress(mailbox.address);
     await refreshMailboxes();
     await selectMailbox(mailbox.address);
-    setStatus(`Mailbox ${mailbox.address} is ready.`);
+    setStatus(`Address ${mailbox.address} is ready.`, 'ok');
   } catch (err) {
-    setStatus(err.message, true);
+    setStatus(err.message, 'error');
   } finally {
-    el.newBtn.disabled = state.domains.length === 0;
+    updateCreateAvailability();
   }
 });
 
@@ -138,44 +209,121 @@ async function refreshMailboxes() {
   try {
     const data = await api('/api/mailboxes');
     state.mailboxes = data.mailboxes || [];
+    // Keep the history in sync: newly seen addresses are remembered.
+    for (const mailbox of [...state.mailboxes].reverse()) {
+      if (!state.history.includes(mailbox.address)) {
+        state.history = [mailbox.address, ...state.history].slice(0, HISTORY_MAX);
+      }
+    }
+    saveHistory();
   } catch (err) {
     state.mailboxes = [];
-    setStatus(err.message, true);
+    setStatus(err.message, 'error');
   }
   renderMailboxes();
+  renderTabs();
+  renderHistory();
+  updateCreateAvailability();
+}
+
+function renderTabs() {
+  el.tabs.innerHTML = '';
+  for (const mailbox of state.mailboxes) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = `tab${mailbox.address === state.currentAddress ? ' active' : ''}`;
+    tab.setAttribute('role', 'tab');
+    tab.title = mailbox.address;
+    const { local } = splitAddress(mailbox.address);
+    tab.innerHTML = `
+      <span class="dot"></span>
+      <span class="local">${escapeHtml(local)}</span>
+      <span class="n">${mailbox.messageCount}</span>
+      <span class="x" title="Delete">✕</span>`;
+    tab.addEventListener('click', (e) => {
+      if (e.target.closest('.x')) return;
+      selectMailbox(mailbox.address);
+    });
+    tab.querySelector('.x').addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteMailbox(mailbox.address);
+    });
+    el.tabs.appendChild(tab);
+  }
 }
 
 function renderMailboxes() {
   el.mailboxList.innerHTML = '';
   el.sidebarHint.style.display = state.mailboxes.length ? 'none' : 'block';
+
   for (const mailbox of state.mailboxes) {
+    const { local, domain } = splitAddress(mailbox.address);
     const li = document.createElement('li');
     li.className = `mailbox-item${mailbox.address === state.currentAddress ? ' active' : ''}`;
     li.innerHTML = `
-      <span class="addr">${escapeHtml(mailbox.address)}</span>
+      <span>
+        <span class="local">${escapeHtml(local)}</span>
+        <span class="domain">@${escapeHtml(domain)}</span>
+      </span>
       <span class="count">${mailbox.messageCount}</span>
-      <button class="del ghost" title="Delete">✕</button>`;
+      <button class="icon-btn" title="Delete" aria-label="Delete">✕</button>`;
     li.addEventListener('click', (e) => {
-      if (e.target.closest('.del')) return;
+      if (e.target.closest('.icon-btn')) return;
       selectMailbox(mailbox.address);
     });
-    li.querySelector('.del').addEventListener('click', async (e) => {
+    li.querySelector('.icon-btn').addEventListener('click', (e) => {
       e.stopPropagation();
-      if (!confirm(`Delete ${mailbox.address}?`)) return;
-      try {
-        await api(`/api/mailboxes/${encodeURIComponent(mailbox.address)}`, { method: 'DELETE' });
-        if (state.currentAddress === mailbox.address) {
-          state.currentAddress = null;
-          state.messages = [];
-          renderMessages();
-          renderMessageView(null);
-        }
-        await refreshMailboxes();
-      } catch (err) {
-        setStatus(err.message, true);
-      }
+      deleteMailbox(mailbox.address);
     });
     el.mailboxList.appendChild(li);
+  }
+}
+
+function renderHistory() {
+  el.historyList.innerHTML = '';
+  el.historyHint.style.display = state.history.length ? 'none' : 'block';
+
+  for (const address of state.history) {
+    const active = state.mailboxes.some((m) => m.address === address);
+    const { local, domain } = splitAddress(address);
+    const li = document.createElement('li');
+    li.className = `history-item${address === state.currentAddress ? ' active' : ''}${active ? '' : ' stale'}`;
+    li.innerHTML = `
+      <span>
+        <span class="local">${escapeHtml(local)}</span>
+        <span class="domain">@${escapeHtml(domain)}</span>
+      </span>
+      ${active ? '' : '<span class="tag">expired</span>'}
+      <button class="icon-btn" title="Forget" aria-label="Forget">✕</button>`;
+    li.addEventListener('click', (e) => {
+      if (e.target.closest('.icon-btn')) return;
+      if (active) selectMailbox(address);
+      else setStatus('That address has expired - create a new one.', 'error');
+    });
+    li.querySelector('.icon-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      forgetAddress(address);
+    });
+    el.historyList.appendChild(li);
+  }
+}
+
+async function deleteMailbox(address) {
+  if (!confirm(`Delete ${address}?`)) return;
+  try {
+    await api(`/api/mailboxes/${encodeURIComponent(address)}`, { method: 'DELETE' });
+    if (state.currentAddress === address) {
+      state.currentAddress = null;
+      state.messages = [];
+      el.currentAddress.textContent = 'No address selected';
+      renderMessages();
+      renderMessageView(null);
+      tickTtl();
+    }
+    await refreshMailboxes();
+    setStatus(`Deleted ${address}.`);
+  } catch (err) {
+    setStatus(err.message, 'error');
   }
 }
 
@@ -185,13 +333,16 @@ async function selectMailbox(address) {
   const mailbox = state.mailboxes.find((m) => m.address === address);
   el.currentAddress.textContent = address;
   el.copyBtn.disabled = false;
+  el.qrBtn.disabled = false;
   renderMailboxes();
+  renderTabs();
+  renderHistory();
   renderMessageView(null);
-  if (mailbox) tickTtl(mailbox);
+  tickTtl();
   await loadMessages();
 }
 
-/* --------------------------------------------------------- messages */
+/* -------------------------------------------------------------- messages */
 async function loadMessages() {
   if (!state.currentAddress) return;
   try {
@@ -199,7 +350,7 @@ async function loadMessages() {
     state.messages = data.messages || [];
     renderMessages();
   } catch (err) {
-    setStatus(err.message, true);
+    setStatus(err.message, 'error');
   }
 }
 
@@ -210,7 +361,7 @@ function renderMessages() {
     return;
   }
   if (state.messages.length === 0) {
-    el.messageList.innerHTML = '<li class="empty">Waiting for mail…</li>';
+    el.messageList.innerHTML = '<li class="empty">Waiting for mail...</li>';
     return;
   }
   for (const msg of state.messages) {
@@ -237,7 +388,7 @@ async function openMessage(messageId) {
     );
     renderMessageView(msg);
   } catch (err) {
-    setStatus(err.message, true);
+    setStatus(err.message, 'error');
   }
 }
 
@@ -279,8 +430,8 @@ function renderMessageView(msg) {
     iframe.srcdoc = msg.html; // already sanitised by the server
     iframe.addEventListener('load', () => {
       try {
-        iframe.style.height = `${Math.min(iframe.contentDocument.body.scrollHeight + 40, 800)}px`;
-      } catch { /* sandboxed — ignore */ }
+        iframe.style.height = `${Math.min(iframe.contentDocument.body.scrollHeight + 40, 900)}px`;
+      } catch { /* sandboxed - ignore */ }
     });
     host.appendChild(iframe);
   } else {
@@ -290,26 +441,94 @@ function renderMessageView(msg) {
   }
 }
 
-/* --------------------------------------------------- live updates */
+/* ---------------------------------------------------------- extend / QR */
+el.extendBtn.addEventListener('click', async () => {
+  if (!state.currentAddress) return;
+  el.extendBtn.disabled = true;
+  try {
+    const data = await api(`/api/mailboxes/${encodeURIComponent(state.currentAddress)}/extend`, {
+      method: 'POST',
+    });
+    const idx = state.mailboxes.findIndex((m) => m.address === data.mailbox.address);
+    if (idx >= 0) state.mailboxes[idx] = data.mailbox;
+    tickTtl();
+    setStatus(`Extended. Now expires in ${state.ttlMinutes} minute(s).`, 'ok');
+  } catch (err) {
+    setStatus(err.message, 'error');
+  } finally {
+    updateExtendAvailability();
+  }
+});
+
+function updateExtendAvailability() {
+  const mailbox = state.mailboxes.find((m) => m.address === state.currentAddress);
+  if (!mailbox) {
+    el.extendBtn.disabled = true;
+    return;
+  }
+  const hardCap = mailbox.createdAt + state.maxMailboxLifetimeMinutes * 60000;
+  el.extendBtn.disabled = mailbox.expiresAt >= hardCap - 1000;
+  el.extendBtn.title = el.extendBtn.disabled
+    ? 'Maximum lifetime reached'
+    : 'Extend by one TTL period';
+}
+
+el.qrBtn.addEventListener('click', async () => {
+  if (!state.currentAddress) return;
+  setStatus('Generating QR code...');
+  try {
+    const data = await api(`/api/mailboxes/${encodeURIComponent(state.currentAddress)}/qr`);
+    el.qrImage.src = data.dataUrl;
+    el.qrAddress.textContent = data.address;
+    el.qrModal.hidden = false;
+    setStatus('');
+  } catch (err) {
+    setStatus(err.message, 'error');
+  }
+});
+
+function closeQrModal() {
+  el.qrModal.hidden = true;
+  el.qrImage.removeAttribute('src');
+}
+el.qrClose.addEventListener('click', closeQrModal);
+el.qrModal.addEventListener('click', (e) => {
+  if (e.target === el.qrModal) closeQrModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !el.qrModal.hidden) closeQrModal();
+});
+
+/* --------------------------------------------------------- live updates */
 function connectSocket() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const socket = new WebSocket(`${proto}://${location.host}/ws?sessionId=${encodeURIComponent(state.sessionId)}`);
   state.socket = socket;
 
+  socket.addEventListener('open', () => {
+    state.socketRetry = 0;
+  });
+
   socket.addEventListener('message', (event) => {
     let payload;
     try { payload = JSON.parse(event.data); } catch { return; }
+
     if (payload.type === 'message') {
       if (payload.address === state.currentAddress) {
         state.messages.unshift(payload.message);
         renderMessages();
-        setStatus('New message received.');
+        setStatus('New message received.', 'ok');
       }
       const mailbox = state.mailboxes.find((m) => m.address === payload.address);
       if (mailbox) {
         mailbox.messageCount += 1;
         renderMailboxes();
+        renderTabs();
       }
+    } else if (payload.type === 'extended') {
+      const mailbox = state.mailboxes.find((m) => m.address === payload.address);
+      if (mailbox) mailbox.expiresAt = payload.expiresAt;
+      tickTtl();
     } else if (payload.type === 'expired') {
       state.mailboxes = state.mailboxes.filter((m) => m.address !== payload.address);
       if (state.currentAddress === payload.address) {
@@ -317,17 +536,23 @@ function connectSocket() {
         state.messages = [];
         el.currentAddress.textContent = 'Address expired';
         el.copyBtn.disabled = true;
+        el.qrBtn.disabled = true;
         renderMessages();
         renderMessageView(null);
-        setStatus('This address expired and was cleaned up.', true);
+        setStatus('This address expired and was cleaned up.', 'error');
       }
       renderMailboxes();
+      renderTabs();
+      renderHistory();
+      updateCreateAvailability();
+      tickTtl();
     }
   });
 
   socket.addEventListener('close', () => {
     state.socket = null;
-    setTimeout(connectSocket, 3000);
+    state.socketRetry = Math.min(state.socketRetry + 1, 6);
+    setTimeout(connectSocket, Math.min(3000 * state.socketRetry, 15000));
   });
 }
 
@@ -336,25 +561,35 @@ function pollFallback() {
   if (state.currentAddress) loadMessages();
 }
 
-/* ----------------------------------------------------------- misc UI */
+/* ------------------------------------------------------------- misc UI */
 el.copyBtn.addEventListener('click', async () => {
   if (!state.currentAddress) return;
   try {
     await navigator.clipboard.writeText(state.currentAddress);
-    setStatus('Address copied to clipboard.');
+    setStatus('Address copied to clipboard.', 'ok');
   } catch {
-    setStatus('Copy failed — select the address manually.', true);
+    setStatus('Copy failed - select the address manually.', 'error');
   }
 });
 
 function tickTtl() {
   const mailbox = state.mailboxes.find((m) => m.address === state.currentAddress);
-  if (!mailbox) { el.ttl.textContent = ''; return; }
+  if (!mailbox) {
+    el.ttl.textContent = '';
+    updateExtendAvailability();
+    return;
+  }
   const remaining = mailbox.expiresAt - Date.now();
-  if (remaining <= 0) { el.ttl.textContent = 'expiring…'; return; }
-  const mins = Math.floor(remaining / 60000);
-  const secs = Math.floor((remaining % 60000) / 1000);
-  el.ttl.textContent = `expires in ${mins}m ${String(secs).padStart(2, '0')}s`;
+  if (remaining <= 0) {
+    el.ttl.textContent = 'expiring...';
+    el.ttl.classList.add('warn');
+  } else {
+    const mins = Math.floor(remaining / 60000);
+    const secs = Math.floor((remaining % 60000) / 1000);
+    el.ttl.textContent = `expires in ${mins}m ${String(secs).padStart(2, '0')}s`;
+    el.ttl.classList.toggle('warn', remaining < 60000);
+  }
+  updateExtendAvailability();
 }
 
 init();
