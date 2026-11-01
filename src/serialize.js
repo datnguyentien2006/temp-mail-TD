@@ -12,6 +12,7 @@ export function toPublicMailbox(mailbox) {
     domain: mailbox.domain,
     createdAt: mailbox.createdAt,
     expiresAt: mailbox.expiresAt,
+    extendCount: mailbox.extendCount ?? 0,
     messageCount: mailbox.messages.length,
   };
 }

@@ -3,6 +3,7 @@
  */
 import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
+import QRCode from 'qrcode';
 import {
   buildAddress,
   normalizeLocalPart,
@@ -28,6 +29,17 @@ function createCreateLimiter(config) {
   });
 }
 
+/** A gentler limiter for the "extend lifetime" action. */
+function createExtendLimiter() {
+  return rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many extend requests. Please slow down.' },
+  });
+}
+
 /** Resolve and validate the per-browser session id, replying 400 if invalid. */
 function requireSession(req, res) {
   const raw = req.get('x-session-id') || req.query.sessionId;
@@ -42,17 +54,26 @@ function requireSession(req, res) {
 export function createRouter({ store, config }) {
   const router = Router();
   const createLimiter = createCreateLimiter(config);
+  const extendLimiter = createExtendLimiter();
 
   router.get('/api/health', (req, res) => {
     res.json({ status: 'ok', uptime: Math.round(process.uptime()) });
+  });
+
+  // Dedicated endpoint so the UI can fill its domain picker from the server's
+  // configuration instead of hardcoding anything.
+  router.get('/api/domains', (req, res) => {
+    res.json({ domains: config.domains });
   });
 
   router.get('/api/config', (req, res) => {
     res.json({
       domains: config.domains,
       ttlMinutes: config.ttlMinutes,
+      maxMailboxLifetimeMinutes: config.maxMailboxLifetimeMinutes,
       maxMailboxesPerSession: config.maxMailboxesPerSession,
       randomLocalPartLength: config.randomLocalPartLength,
+      pollIntervalMs: config.pollIntervalMs,
     });
   });
 
@@ -126,6 +147,45 @@ export function createRouter({ store, config }) {
     }
     store.deleteMailbox(address);
     return res.status(204).end();
+  });
+
+  // Push the mailbox's expiry forward (bounded by MAX_MAILBOX_LIFETIME_MINUTES).
+  router.post('/api/mailboxes/:address/extend', extendLimiter, (req, res) => {
+    const sessionId = requireSession(req, res);
+    if (!sessionId) return;
+    const { address } = req.params;
+    if (!store.owns(address, sessionId)) {
+      return res.status(404).json({ error: 'Mailbox not found.' });
+    }
+    const mailbox = store.extendMailbox(address, {
+      ttlMs: config.ttlMs,
+      maxLifetimeMs: config.maxMailboxLifetimeMs,
+    });
+    if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
+    return res.json({ mailbox: toPublicMailbox(mailbox) });
+  });
+
+  // QR code for the address, returned as a data URL so the client can render
+  // it with the normal session header (no session id in an <img> URL).
+  router.get('/api/mailboxes/:address/qr', async (req, res, next) => {
+    const sessionId = requireSession(req, res);
+    if (!sessionId) return;
+    const { address } = req.params;
+    if (!store.owns(address, sessionId)) {
+      return res.status(404).json({ error: 'Mailbox not found.' });
+    }
+    try {
+      const svg = await QRCode.toString(address, {
+        type: 'svg',
+        margin: 1,
+        width: 240,
+        errorCorrectionLevel: 'M',
+      });
+      const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+      return res.json({ address, dataUrl });
+    } catch (error) {
+      return next(error);
+    }
   });
 
   router.get('/api/mailboxes/:address/messages', (req, res) => {

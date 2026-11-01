@@ -24,6 +24,7 @@
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
     "mailparser": "^3.7.1",
+    "qrcode": "^1.5.4",
     "sanitize-html": "^2.14.0",
     "smtp-server": "^3.13.6",
     "ws": "^8.18.0"

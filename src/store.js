@@ -9,6 +9,7 @@
  *   - 'mailbox:created' (mailbox)
  *   - 'mailbox:deleted' (mailbox)
  *   - 'mailbox:expired' (mailbox)
+ *   - 'mailbox:extended' (mailbox)
  *   - 'message'         ({ mailbox, message })
  */
 import { EventEmitter } from 'node:events';
@@ -56,6 +57,7 @@ export class MailboxStore extends EventEmitter {
       sessionId,
       createdAt: now,
       expiresAt: now + ttlMs,
+      extendCount: 0,
       messages: [],
     };
 
@@ -83,6 +85,26 @@ export class MailboxStore extends EventEmitter {
   owns(address, sessionId) {
     const mailbox = this.get(address);
     return Boolean(mailbox && mailbox.sessionId === sessionId);
+  }
+
+  /**
+   * Push a mailbox's expiry forward by one TTL, never beyond `maxLifetimeMs`
+   * measured from its creation. Returns the mailbox, or null if it is unknown.
+   */
+  extendMailbox(address, { ttlMs = this.ttlMs, maxLifetimeMs = Infinity } = {}) {
+    const mailbox = this.get(address);
+    if (!mailbox) return null;
+
+    const now = Date.now();
+    const hardCap = mailbox.createdAt + maxLifetimeMs;
+    const target = Math.min(now + ttlMs, hardCap);
+
+    if (target > mailbox.expiresAt) {
+      mailbox.expiresAt = target;
+      mailbox.extendCount = (mailbox.extendCount ?? 0) + 1;
+      this.emit('mailbox:extended', mailbox);
+    }
+    return mailbox;
   }
 
   deleteMailbox(address) {

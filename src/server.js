@@ -58,6 +58,14 @@ store.on('mailbox:expired', (mailbox) => {
   broadcastToSession(mailbox.sessionId, { type: 'expired', address: mailbox.address });
 });
 
+store.on('mailbox:extended', (mailbox) => {
+  broadcastToSession(mailbox.sessionId, {
+    type: 'extended',
+    address: mailbox.address,
+    expiresAt: mailbox.expiresAt,
+  });
+});
+
 // --- SMTP --------------------------------------------------------------
 const smtpServer = createSmtpServer({ store, config });
 smtpServer.on('error', (err) => {
