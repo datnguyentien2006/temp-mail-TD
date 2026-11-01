@@ -1,0 +1,133 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-2: #273449;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-2: #22d3ee;
+  --danger: #f87171;
+  --border: #334155;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { font-size: 1.25rem; font-weight: 700; letter-spacing: 0.02em; }
+
+.newmail { display: flex; gap: 8px; flex-wrap: wrap; }
+
+input, select, button {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+button {
+  cursor: pointer;
+  background: var(--accent);
+  color: #04263a;
+  font-weight: 600;
+  border: none;
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 500; }
+button.ghost:hover { color: var(--text); border-color: var(--accent); }
+
+main { flex: 1; display: flex; min-height: 0; }
+
+.sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 16px;
+  border-right: 1px solid var(--border);
+  background: #16202e;
+  overflow-y: auto;
+}
+
+.sidebar h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 10px; }
+
+.mailbox-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.mailbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  word-break: break-all;
+  font-size: 0.9rem;
+}
+
+.mailbox-item:hover { background: var(--panel-2); }
+.mailbox-item.active { border-color: var(--accent); background: var(--panel-2); }
+.mailbox-item .count { margin-left: auto; color: var(--muted); font-size: 0.75rem; }
+.mailbox-item .del { background: transparent; color: var(--danger); border: none; padding: 2px 6px; }
+
+.content { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 16px 20px; gap: 12px; overflow: hidden; }
+
+.addressbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.addr { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 1.1rem; font-weight: 600; color: var(--accent-2); word-break: break-all; }
+.ttl { color: var(--muted); font-size: 0.85rem; margin-left: auto; }
+
+.status { color: var(--muted); min-height: 1.2em; font-size: 0.9rem; }
+.status.error { color: var(--danger); }
+
+.inbox { flex: 1; display: flex; gap: 16px; min-height: 0; }
+
+.messages { list-style: none; margin: 0; padding: 0; width: 340px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border); }
+
+.message { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.message:hover { background: var(--panel-2); }
+.message.active { background: var(--panel-2); border-left: 3px solid var(--accent); }
+.message .from { font-weight: 600; font-size: 0.9rem; }
+.message .subject { font-size: 0.9rem; color: var(--text); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message .meta { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 0.75rem; margin-top: 4px; }
+.message .badge { color: var(--accent); }
+
+.message-view { flex: 1; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+.message-view header { border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 12px; }
+.message-view h3 { margin: 0 0 6px; }
+.message-view .headers { color: var(--muted); font-size: 0.85rem; line-height: 1.5; }
+.message-view iframe { width: 100%; min-height: 320px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.message-view pre { white-space: pre-wrap; word-break: break-word; font-size: 0.9rem; }
+.attachments { margin-top: 12px; }
+.attachments a { color: var(--accent); }
+
+.hint { color: var(--muted); font-size: 0.85rem; }
+.empty { color: var(--muted); padding: 16px; }
+
+@media (max-width: 820px) {
+  main { flex-direction: column; }
+  .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); max-height: 200px; }
+  .inbox { flex-direction: column; }
+  .messages { width: 100%; max-height: 240px; border-right: none; border-bottom: 1px solid var(--border); }
+}

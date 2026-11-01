@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Temp Mail — disposable inbox</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📬 Temp&nbsp;Mail</div>
+    <form id="createForm" class="newmail" autocomplete="off">
+      <select id="domainSelect" aria-label="Domain"></select>
+      <input id="localPartInput" type="text" placeholder="custom name (optional)" maxlength="64" />
+      <button id="newBtn" type="submit">New address</button>
+    </form>
+  </header>
+
+  <main>
+    <aside class="sidebar">
+      <h2>Your addresses</h2>
+      <ul id="mailboxList" class="mailbox-list"></ul>
+      <p id="sidebarHint" class="hint">No addresses yet — create one above.</p>
+    </aside>
+
+    <section class="content">
+      <div class="addressbar">
+        <span id="currentAddress" class="addr">No address selected</span>
+        <button id="copyBtn" type="button" disabled>Copy</button>
+        <span id="ttl" class="ttl"></span>
+      </div>
+
+      <div id="status" class="status" role="status"></div>
+
+      <div class="inbox">
+        <ul id="messageList" class="messages"></ul>
+        <div id="messageView" class="message-view" hidden></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
