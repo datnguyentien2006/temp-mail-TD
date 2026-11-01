@@ -7,20 +7,27 @@ receive anything sent to them — straight into the browser, live.
 
 ## Features
 
-- **One-click mailbox creation** — random local part on a chosen domain, or a custom local part
-  (validated, reserved names blocked, uniqueness enforced).
+- **Domain dropdown, driven by the server** — the UI fills its picker from `GET /api/domains`
+  (nothing is hardcoded in the HTML) and offers a **Random domain** option. The backend validates
+  that every submitted domain is in the configured allow-list.
+- **One-click mailbox creation** — random local part on the chosen domain, or a custom local part
+  (format/length validated, reserved names blocked, uniqueness enforced).
 - **Receive mail for real** — an inbound SMTP server accepts mail for the configured domains and
   stores it for the matching mailbox.
-- **Live inbox** — new mail is pushed over WebSocket; falls back to polling automatically.
-- **Multiple domains** — configured via `DOMAINS=a.com,b.net`; the UI shows a dropdown and the
-  backend validates every selection.
-- **Instant switching** — keep several addresses open, switch between them with immediate effect,
-  delete any of them.
+- **Live inbox** — new mail is pushed over WebSocket; falls back to polling automatically at a
+  configurable interval (`POLL_INTERVAL_MS`).
+- **Multiple inboxes** — keep several addresses open at once, switch with a tab/click and instant
+  effect, delete any of them (cap: `MAX_MAILBOXES_PER_SESSION`).
+- **Recent-address history** — the last 20 addresses are remembered in `localStorage`; still-valid
+  ones can be switched back to, expired ones are marked as such.
+- **Session timer** — the active address shows a live countdown to expiry, with an **Extend**
+  button that pushes it forward by one TTL (bounded by `MAX_MAILBOX_LIFETIME_MINUTES`).
 - **Temporary by design** — every mailbox and its messages expire after a configurable TTL, with a
   background cleanup job that also tells the UI when an address is gone.
 - **Safe HTML rendering** — inbound HTML is sanitised server-side and rendered inside a
   sandboxed iframe (no scripts, no same-origin).
 - **Attachments** — listed with name/size/type and downloadable on demand.
+- **Convenience** — copy-address button and an on-demand QR code for the active address.
 - **Hardening** — rate limiting on creation, strict input validation, no secrets in the repo.
 
 ## Architecture
@@ -45,6 +52,7 @@ receive anything sent to them — straight into the browser, live.
 | MIME parsing | [`mailparser`](https://www.npmjs.com/package/mailparser) | text/html/attachments |
 | Live updates | [`ws`](https://www.npmjs.com/package/ws) | WebSocket push (+ polling fallback) |
 | HTML safety | [`sanitize-html`](https://www.npmjs.com/package/sanitize-html) | allow-list sanitiser |
+| QR code | [`qrcode`](https://www.npmjs.com/package/qrcode) | server-side SVG for the active address |
 | Storage | in-memory `MailboxStore` | disposable by design; zero infra |
 
 **Why in-memory?** Temp mail is ephemeral, so a database adds operational cost for no benefit here.
@@ -52,16 +60,18 @@ receive anything sent to them — straight into the browser, live.
 
 ### How a mailbox and its mail flow
 
-1. The browser calls `POST /api/mailboxes` with a `x-session-id` header (a UUID kept in
-   `localStorage`) and a domain.
+1. The browser calls `GET /api/domains` to fill its domain picker (with a **Random** option), then
+   `POST /api/mailboxes` with a `x-session-id` header (a UUID kept in `localStorage`) and a domain.
 2. The server validates the domain against `DOMAINS`, validates/generates the local part, and stores
    a mailbox with `expiresAt = now + MAILBOX_TTL_MINUTES`.
 3. When someone emails that address, the SMTP server checks `RCPT TO` — the domain must be allowed
    **and** the mailbox must exist, otherwise it answers `550`.
 4. The message is MIME-parsed, HTML is sanitised, and it is stored on the mailbox.
 5. The store emits an event; the WebSocket hub pushes it to the owning session, and the UI prepends
-   it to the inbox (polling every 8 s if the socket is down).
-6. The TTL sweeper deletes expired mailboxes and notifies the UI.
+   it to the inbox (polling every `POLL_INTERVAL_MS` if the socket is down).
+6. `POST /api/mailboxes/:address/extend` pushes a mailbox's expiry forward by one TTL, never beyond
+   `MAX_MAILBOX_LIFETIME_MINUTES` from creation.
+7. The TTL sweeper deletes expired mailboxes and notifies the UI.
 
 ## Quick start (local dev)
 
@@ -97,8 +107,10 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `SMTP_MAX_MESSAGE_BYTES` | `10485760` | Max accepted message size |
 | `SMTP_TLS_KEY` / `SMTP_TLS_CERT` | *(empty)* | Set **both** to enable STARTTLS on inbound SMTP |
 | `MAILBOX_TTL_MINUTES` | `30` | Mailbox lifetime |
-| `MAX_MAILBOXES_PER_SESSION` | `10` | Per-browser cap |
+| `MAX_MAILBOX_LIFETIME_MINUTES` | `4 × TTL` | Hard ceiling on a mailbox's total life (caps `extend`) |
+| `MAX_MAILBOXES_PER_SESSION` | `5` | Per-browser cap on simultaneous inboxes |
 | `SWEEP_INTERVAL_MS` | `60000` | Cleanup job interval |
+| `POLL_INTERVAL_MS` | `8000` | Client polling interval when the WebSocket is unavailable |
 | `CREATE_RATE_LIMIT_WINDOW_MS` | `600000` | Creation rate-limit window |
 | `CREATE_RATE_LIMIT_MAX` | `30` | Max creations per window per IP |
 | `CORS_ORIGIN` | *(empty)* | Set to allow cross-origin API calls |
@@ -106,6 +118,11 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `RANDOM_LOCAL_PART_LENGTH` | `10` | Length of generated local parts |
 
 ## Configuring domains & DNS
+
+List **every domain you own and want to receive mail for** in `DOMAINS` (comma-separated). They all
+share one inbound SMTP server. The UI reads this list at runtime from `GET /api/domains` and shows it
+in a dropdown (plus a *Random* entry); the server rejects any domain that is not in the list, so you
+cannot be tricked into accepting mail for someone else's domain.
 
 For each domain you list in `DOMAINS`:
 
@@ -132,23 +149,27 @@ The server does **not** send mail; it only receives. No MTA/relay is required.
 
 ## API
 
-All endpoints except `/api/health`, `/api/config` require the `x-session-id` header
+All endpoints except `/api/health`, `/api/config` and `/api/domains` require the `x-session-id` header
 (any 8–128 char `[A-Za-z0-9_-]` string; the bundled frontend uses a UUID).
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/health` | Liveness probe |
-| `GET` | `/api/config` | Allowed domains + TTL (public) |
-| `POST` | `/api/mailboxes` | Create a mailbox. Body `{ domain?, localPart? }`. `201` with the mailbox, `400` invalid, `409` taken, `429` rate/limit |
+| `GET` | `/api/domains` | The configured domain allow-list (public; fills the UI picker) |
+| `GET` | `/api/config` | Domains, TTL, lifetime cap, per-session cap and polling interval (public) |
+| `POST` | `/api/mailboxes` | Create a mailbox. Body `{ domain?, localPart? }`. Omit `domain` for a random one. `201` with the mailbox, `400` invalid, `409` taken, `429` rate/limit |
 | `GET` | `/api/mailboxes` | List the session's mailboxes |
 | `DELETE` | `/api/mailboxes/:address` | Delete a mailbox |
+| `POST` | `/api/mailboxes/:address/extend` | Extend the mailbox by one TTL (capped by `MAX_MAILBOX_LIFETIME_MINUTES`) |
+| `GET` | `/api/mailboxes/:address/qr` | QR code for the address as an SVG data URL |
 | `GET` | `/api/mailboxes/:address/messages` | List message summaries |
 | `GET` | `/api/mailboxes/:address/messages/:id` | Full message (sanitised HTML + text) |
 | `DELETE` | `/api/mailboxes/:address/messages/:id` | Delete a message |
 | `GET` | `/api/mailboxes/:address/messages/:id/attachments/:index` | Download an attachment |
 
 WebSocket: `ws://host/ws?sessionId=<session>` — server pushes
-`{type:"message",address,message}` and `{type:"expired",address}`.
+`{type:"message",address,message}`, `{type:"extended",address,expiresAt}` and
+`{type:"expired",address}`.
 
 Example:
 
@@ -164,10 +185,18 @@ curl -s -X POST http://localhost:3000/api/mailboxes \
 npm test
 ```
 
-Covers domain allow-listing, local-part validation, random generation, mailbox creation /
-duplication / limits / deletion, session isolation, TTL eviction, **inbound mail over a real SMTP
-connection**, attachment capture, HTML sanitisation, and 550 rejection for unknown mailboxes and
-disallowed domains.
+Covers the domain list endpoint, random-domain selection, domain allow-listing (unknown domains
+rejected), local-part/custom-username rules, reserved names, mailbox creation / duplication / limits /
+deletion, session isolation, TTL eviction, expiry extension and its cap, the QR endpoint, **inbound
+mail over a real SMTP connection**, attachment capture, HTML sanitisation, and 550 rejection for
+unknown mailboxes and disallowed domains.
+
+## Provenance
+
+This project is an original, self-hosted implementation. It was *inspired* by the feature set of
+other temp-mail front-ends, but contains **no** copied code, CSS, text or assets from them, and it
+does **not** call any third-party mail API — it runs its own SMTP server and only ever uses the
+domains you configure in `DOMAINS`.
 
 ## Deployment notes
 
@@ -208,6 +237,10 @@ disallowed domains.
 ## Known limitations / next steps
 
 - **In-memory storage** — a restart drops mailboxes. Add Redis/SQLite persistence if needed.
+- **History is per-browser** — recent addresses live in `localStorage`, so they do not follow the
+  user across devices.
+- **No push for "extend" across tabs beyond the same session** — the WebSocket broadcast covers the
+  owning session only.
 - **Plaintext SMTP by default** — enable `SMTP_TLS_*` for encrypted inbound delivery.
 - **No DKIM/outbound** — this app only receives.
 - **In-process WebSocket fan-out** — for multiple instances, add a Redis pub/sub bridge.
