@@ -6,6 +6,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './routes.js';
+import { createProviders } from './providers/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -21,8 +22,9 @@ function corsMiddleware(corsOrigin) {
   };
 }
 
-export function createApp({ store, config }) {
+export function createApp({ store, config, providers }) {
   const app = express();
+  const mailboxProviders = providers ?? createProviders({ store, config });
   app.disable('x-powered-by');
   if (config.trustProxy) app.set('trust proxy', 1);
 
@@ -38,7 +40,7 @@ export function createApp({ store, config }) {
 
   if (config.corsOrigin) app.use(corsMiddleware(config.corsOrigin));
 
-  app.use(createRouter({ store, config }));
+  app.use(createRouter({ store, config, providers: mailboxProviders }));
 
   app.use(express.static(PUBLIC_DIR, { index: 'index.html' }));
 
@@ -51,6 +53,10 @@ export function createApp({ store, config }) {
     }
     if (err?.type === 'entity.parse.failed') {
       return res.status(400).json({ error: 'Invalid JSON body.' });
+    }
+    // Provider errors already carry a safe status + message.
+    if (err?.expose && Number.isInteger(Number(err.status))) {
+      return res.status(Number(err.status)).json({ error: err.message });
     }
     console.error('[http] unhandled error:', err);
     return res.status(500).json({ error: 'Internal server error.' });

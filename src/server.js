@@ -9,6 +9,7 @@ import { MailboxStore } from './store.js';
 import { createApp } from './app.js';
 import { createSmtpServer } from './smtp.js';
 import { toPublicMessageSummary } from './serialize.js';
+import { createProviders } from './providers/index.js';
 
 const config = loadConfig();
 const store = new MailboxStore({
@@ -16,7 +17,8 @@ const store = new MailboxStore({
   maxMailboxesPerSession: config.maxMailboxesPerSession,
 });
 
-const app = createApp({ store, config });
+const providers = createProviders({ store, config });
+const app = createApp({ store, config, providers });
 const server = http.createServer(app);
 
 // --- WebSocket hub: push new mail to the owning session ----------------
@@ -25,12 +27,14 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (socket, req) => {
   const url = new URL(req.url, 'http://localhost');
   socket.sessionId = url.searchParams.get('sessionId') || null;
+  if (socket.sessionId) providers.markSessionActive(socket.sessionId);
 
   socket.on('message', (raw) => {
     try {
       const payload = JSON.parse(raw.toString());
       if (payload?.type === 'subscribe' && payload.sessionId) {
         socket.sessionId = String(payload.sessionId);
+        providers.markSessionActive(socket.sessionId);
       }
     } catch {
       /* ignore malformed client frames */
@@ -75,6 +79,9 @@ smtpServer.on('error', (err) => {
 // --- Background cleanup ------------------------------------------------
 store.startSweeper(config.sweepIntervalMs);
 
+// --- Guerrilla Mail polling (open inboxes only) -------------------------
+providers.start();
+
 // --- Start listening ---------------------------------------------------
 if (config.domains.length === 0) {
   console.warn(
@@ -88,6 +95,17 @@ server.listen(config.port, config.host, () => {
   console.log(`[smtp] listening on ${config.smtp.host}:${config.smtp.port}`);
   console.log(`[config] domains: ${config.domains.join(', ') || '(none configured)'}`);
   console.log(`[config] mailbox TTL: ${config.ttlMinutes} minute(s)`);
+  console.log(
+    `[config] providers: ${providers
+      .list()
+      .map((provider) => provider.id)
+      .join(', ')}`,
+  );
+  if (config.guerrilla.enabled) {
+    console.log(
+      `[guerrilla] enabled; polling open inboxes every ${config.guerrilla.pollIntervalMs} ms`,
+    );
+  }
 });
 
 smtpServer.listen(config.smtp.port, config.smtp.host, () => {
@@ -97,6 +115,7 @@ smtpServer.listen(config.smtp.port, config.smtp.host, () => {
 // --- Graceful shutdown -------------------------------------------------
 function shutdown(signal) {
   console.log(`\n[app] ${signal} received, shutting down...`);
+  providers.stop();
   wss.close();
   server.close();
   smtpServer.close(() => process.exit(0));

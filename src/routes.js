@@ -1,21 +1,14 @@
 /**
  * REST API routes.
+ *
+ * Mailbox operations are delegated to the provider registry (self-hosted SMTP
+ * or Guerrilla Mail). Endpoint paths and the response shapes used by the
+ * existing frontend are preserved.
  */
 import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import QRCode from 'qrcode';
-import {
-  buildAddress,
-  normalizeLocalPart,
-  randomLocalPart,
-  validateDomain,
-  validateLocalPart,
-} from './mailboxes.js';
-import {
-  toPublicMailbox,
-  toPublicMessage,
-  toPublicMessageSummary,
-} from './serialize.js';
+import { toPublicMailbox, toPublicMessage, toPublicMessageSummary } from './serialize.js';
 
 const SESSION_RE = /^[a-zA-Z0-9_-]{8,128}$/;
 
@@ -51,24 +44,39 @@ function requireSession(req, res) {
   return sessionId;
 }
 
-export function createRouter({ store, config }) {
+/** Express 4 does not catch rejected async handlers, so do it explicitly. */
+function wrap(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+export function createRouter({ store, config, providers }) {
   const router = Router();
   const createLimiter = createCreateLimiter(config);
   const extendLimiter = createExtendLimiter();
+
+  /** Return the mailbox if it belongs to this session, otherwise null. */
+  function ownedMailbox(address, sessionId) {
+    const mailbox = store.get(address);
+    if (!mailbox || mailbox.sessionId !== sessionId) return null;
+    return mailbox;
+  }
 
   router.get('/api/health', (req, res) => {
     res.json({ status: 'ok', uptime: Math.round(process.uptime()) });
   });
 
-  // Dedicated endpoint so the UI can fill its domain picker from the server's
-  // configuration instead of hardcoding anything.
+  // Grouped by provider so the UI can build a nested picker. `domains` is the
+  // flat list kept for backwards compatibility.
   router.get('/api/domains', (req, res) => {
-    res.json({ domains: config.domains });
+    res.json({
+      domains: providers.listAllDomains(),
+      providers: providers.descriptor(),
+    });
   });
 
   router.get('/api/config', (req, res) => {
     res.json({
-      domains: config.domains,
+      domains: providers.listAllDomains(),
       ttlMinutes: config.ttlMinutes,
       maxMailboxLifetimeMinutes: config.maxMailboxLifetimeMinutes,
       maxMailboxesPerSession: config.maxMailboxesPerSession,
@@ -77,104 +85,76 @@ export function createRouter({ store, config }) {
     });
   });
 
-  router.post('/api/mailboxes', createLimiter, (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
+  router.post(
+    '/api/mailboxes',
+    createLimiter,
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
 
-    const body = req.body ?? {};
-    const rawLocal = body.localPart;
-    const rawDomain = body.domain;
-
-    // --- domain -------------------------------------------------------
-    let domain;
-    if (rawDomain === undefined || rawDomain === null || String(rawDomain).trim() === '') {
-      if (config.domains.length === 0) {
-        return res.status(503).json({ error: 'No mail domains are configured on this server.' });
-      }
-      domain = config.domains[Math.floor(Math.random() * config.domains.length)];
-    } else {
-      const result = validateDomain(rawDomain, config.domains);
-      if (!result.ok) return res.status(400).json({ error: result.error });
-      domain = result.domain;
-    }
-
-    // --- local part ---------------------------------------------------
-    let localPart;
-    const custom = rawLocal !== undefined && rawLocal !== null && String(rawLocal).trim() !== '';
-    if (custom) {
-      localPart = normalizeLocalPart(rawLocal);
-      const result = validateLocalPart(localPart);
-      if (!result.ok) return res.status(400).json({ error: result.error });
-    } else {
-      let attempts = 0;
-      do {
-        localPart = randomLocalPart(config.randomLocalPartLength);
-        attempts += 1;
-      } while (store.has(buildAddress(localPart, domain)) && attempts < 25);
-    }
-
-    const address = buildAddress(localPart, domain);
-    if (store.has(address)) {
-      return res.status(409).json({ error: `"${address}" is already taken. Try another local part.` });
-    }
-
-    try {
-      const mailbox = store.createMailbox({ address, localPart, domain, sessionId });
+      const body = req.body ?? {};
+      const provider = providers.resolve(body.provider, body.domain);
+      const mailbox = await provider.createMailbox({
+        sessionId,
+        localPart: body.localPart,
+        domain: body.domain,
+      });
       return res.status(201).json(toPublicMailbox(mailbox));
-    } catch (error) {
-      if (error.code === 'TOO_MANY_MAILBOXES') {
-        return res.status(429).json({ error: error.message });
-      }
-      if (error.code === 'ADDRESS_TAKEN') {
-        return res.status(409).json({ error: error.message });
-      }
-      throw error;
-    }
-  });
+    }),
+  );
 
   router.get('/api/mailboxes', (req, res) => {
     const sessionId = requireSession(req, res);
     if (!sessionId) return;
-    res.json({ mailboxes: store.listForSession(sessionId).map(toPublicMailbox) });
+    res.json({ mailboxes: providers.listForSession(sessionId).map(toPublicMailbox) });
   });
 
-  router.delete('/api/mailboxes/:address', (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address } = req.params;
-    if (!store.owns(address, sessionId)) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    store.deleteMailbox(address);
-    return res.status(204).end();
-  });
+  router.delete(
+    '/api/mailboxes/:address',
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address } = req.params;
+      const mailbox = ownedMailbox(address, sessionId);
+      if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
 
-  // Push the mailbox's expiry forward (bounded by MAX_MAILBOX_LIFETIME_MINUTES).
-  router.post('/api/mailboxes/:address/extend', extendLimiter, (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address } = req.params;
-    if (!store.owns(address, sessionId)) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    const mailbox = store.extendMailbox(address, {
-      ttlMs: config.ttlMs,
-      maxLifetimeMs: config.maxMailboxLifetimeMs,
-    });
-    if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
-    return res.json({ mailbox: toPublicMailbox(mailbox) });
-  });
+      await providers.forMailbox(mailbox).deleteMailbox(address, sessionId);
+      return res.status(204).end();
+    }),
+  );
+
+  // Push the mailbox's expiry forward (self-hosted only; Guerrilla Mail has no
+  // supported extend operation).
+  router.post(
+    '/api/mailboxes/:address/extend',
+    extendLimiter,
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address } = req.params;
+      const mailbox = ownedMailbox(address, sessionId);
+      if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
+
+      const provider = providers.forMailbox(mailbox);
+      if (!provider.capabilities?.supportsExtend) {
+        return res.status(400).json({ error: 'This provider does not support extending mailboxes.' });
+      }
+      const updated = await provider.extendMailbox(address, sessionId);
+      return res.json({ mailbox: toPublicMailbox(updated) });
+    }),
+  );
 
   // QR code for the address, returned as a data URL so the client can render
   // it with the normal session header (no session id in an <img> URL).
-  router.get('/api/mailboxes/:address/qr', async (req, res, next) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address } = req.params;
-    if (!store.owns(address, sessionId)) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    try {
+  router.get(
+    '/api/mailboxes/:address/qr',
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address } = req.params;
+      if (!store.owns(address, sessionId)) {
+        return res.status(404).json({ error: 'Mailbox not found.' });
+      }
       const svg = await QRCode.toString(address, {
         type: 'svg',
         margin: 1,
@@ -183,71 +163,81 @@ export function createRouter({ store, config }) {
       });
       const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
       return res.json({ address, dataUrl });
-    } catch (error) {
-      return next(error);
-    }
-  });
+    }),
+  );
 
-  router.get('/api/mailboxes/:address/messages', (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address } = req.params;
-    const mailbox = store.get(address);
-    if (!mailbox || mailbox.sessionId !== sessionId) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    res.json({
-      mailbox: toPublicMailbox(mailbox),
-      messages: mailbox.messages.map(toPublicMessageSummary),
-    });
-  });
+  router.get(
+    '/api/mailboxes/:address/messages',
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address } = req.params;
+      const mailbox = ownedMailbox(address, sessionId);
+      if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
 
-  router.get('/api/mailboxes/:address/messages/:messageId', (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address, messageId } = req.params;
-    if (!store.owns(address, sessionId)) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    const message = store.getMessage(address, messageId);
-    if (!message) return res.status(404).json({ error: 'Message not found.' });
-    return res.json(toPublicMessage(message));
-  });
+      const messages = await providers
+        .forMailbox(mailbox)
+        .listMessages(address, sessionId);
+      return res.json({
+        mailbox: toPublicMailbox(store.get(address) ?? mailbox),
+        messages: messages.map(toPublicMessageSummary),
+      });
+    }),
+  );
 
-  router.delete('/api/mailboxes/:address/messages/:messageId', (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address, messageId } = req.params;
-    if (!store.owns(address, sessionId)) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    if (!store.deleteMessage(address, messageId)) {
-      return res.status(404).json({ error: 'Message not found.' });
-    }
-    return res.status(204).end();
-  });
+  router.get(
+    '/api/mailboxes/:address/messages/:messageId',
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address, messageId } = req.params;
+      const mailbox = ownedMailbox(address, sessionId);
+      if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
 
-  router.get('/api/mailboxes/:address/messages/:messageId/attachments/:index', (req, res) => {
-    const sessionId = requireSession(req, res);
-    if (!sessionId) return;
-    const { address, messageId } = req.params;
-    const index = Number.parseInt(req.params.index, 10);
-    if (!store.owns(address, sessionId)) {
-      return res.status(404).json({ error: 'Mailbox not found.' });
-    }
-    const message = store.getMessage(address, messageId);
-    const attachment = message?.attachments?.[index];
-    if (!attachment) return res.status(404).json({ error: 'Attachment not found.' });
+      const message = await providers
+        .forMailbox(mailbox)
+        .getMessage(address, sessionId, messageId);
+      return res.json(toPublicMessage(message));
+    }),
+  );
 
-    const buffer = Buffer.from(attachment.content || '', 'base64');
-    res.setHeader('Content-Type', attachment.contentType || 'application/octet-stream');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${String(attachment.filename).replace(/["\\\r\n]/g, '_')}"`,
-    );
-    res.setHeader('Content-Length', buffer.length);
-    return res.end(buffer);
-  });
+  router.delete(
+    '/api/mailboxes/:address/messages/:messageId',
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address, messageId } = req.params;
+      const mailbox = ownedMailbox(address, sessionId);
+      if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
+
+      await providers.forMailbox(mailbox).deleteMessage(address, sessionId, messageId);
+      return res.status(204).end();
+    }),
+  );
+
+  router.get(
+    '/api/mailboxes/:address/messages/:messageId/attachments/:index',
+    wrap(async (req, res) => {
+      const sessionId = requireSession(req, res);
+      if (!sessionId) return;
+      const { address, messageId } = req.params;
+      const index = Number.parseInt(req.params.index, 10);
+      const mailbox = ownedMailbox(address, sessionId);
+      if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
+
+      const attachment = await providers
+        .forMailbox(mailbox)
+        .getAttachment(address, sessionId, messageId, index);
+
+      res.setHeader('Content-Type', attachment.contentType || 'application/octet-stream');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${String(attachment.filename).replace(/["\\\r\n]/g, '_')}"`,
+      );
+      res.setHeader('Content-Length', attachment.buffer.length);
+      return res.end(attachment.buffer);
+    }),
+  );
 
   return router;
 }
