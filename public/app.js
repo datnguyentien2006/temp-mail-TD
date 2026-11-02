@@ -216,6 +216,18 @@ function renderDomainOptions() {
     const group = document.createElement('optgroup');
     group.label = provider.label || provider.id;
 
+    if (provider.status && provider.status.available === false) {
+      // Configured but currently unusable (quota reached, missing credentials):
+      // never offer an option that cannot work.
+      const unavailable = document.createElement('option');
+      unavailable.value = '';
+      unavailable.textContent = `${provider.label || provider.id} (temporarily unavailable)`;
+      unavailable.disabled = true;
+      group.appendChild(unavailable);
+      el.domainSelect.appendChild(group);
+      continue;
+    }
+
     const domains = Array.isArray(provider.domains) ? provider.domains : [];
     if (caps.supportsDomainChoice !== false && domains.length > 0) {
       const random = document.createElement('option');
@@ -261,6 +273,7 @@ function syncFormToProvider() {
 function hasCreatableOption() {
   return state.providers.some((provider) => {
     const caps = provider.capabilities || {};
+    if (provider.status && provider.status.available === false) return false;
     if (caps.supportsDomainChoice === false) return true;
     return Array.isArray(provider.domains) && provider.domains.length > 0;
   });
@@ -444,11 +457,21 @@ function renderProviderNotice(mailbox) {
   const provider = providerById(mailbox.provider);
   const caps = provider?.capabilities || {};
   const retention = caps.retentionMinutes || 60;
+
+  let detail;
+  if (mailbox.provider === 'resend') {
+    detail = `Mail is delivered to this app by Resend, a third-party service, and is kept only
+      for this mailbox's lifetime (about ${escapeHtml(retention)} minutes). This inbox is
+      receive-only: you cannot send, reply or forward from it.`;
+  } else {
+    detail = `Third-party inbox. Mail is kept for about ${escapeHtml(retention)} minutes, is not
+      operated by this app and is not under its control.`;
+  }
+
   el.providerNotice.hidden = false;
   el.providerNotice.innerHTML = `
     <strong>${escapeHtml(provider?.label || mailbox.provider)}</strong>
-    <span>Third-party inbox. Mail is kept for about ${escapeHtml(retention)} minutes, is not
-    operated by this app and is not under its control.</span>`;
+    <span>${detail}</span>`;
 }
 
 async function selectMailbox(address) {
@@ -525,13 +548,17 @@ function renderMessageView(msg) {
   }
   el.messageView.hidden = false;
 
+  const mailbox = state.mailboxes.find((m) => m.address === state.currentAddress);
+  const canDownload = providerCapabilities(mailbox?.provider).supportsAttachments !== false;
   const attachments = msg.attachments || [];
   const attachmentHtml = attachments.length
     ? `<div class="attachments"><strong>Attachments:</strong><ul>${attachments
-        .map(
-          (a) =>
-            `<li><a href="/api/mailboxes/${encodeURIComponent(state.currentAddress)}/messages/${msg.id}/attachments/${a.index}">${escapeHtml(a.filename)}</a> (${escapeHtml(a.contentType)}, ${a.size} B)</li>`,
-        )
+        .map((a) => {
+          const suffix = `(${escapeHtml(a.contentType)}, ${a.size} B)`;
+          return canDownload
+            ? `<li><a href="/api/mailboxes/${encodeURIComponent(state.currentAddress)}/messages/${msg.id}/attachments/${a.index}">${escapeHtml(a.filename)}</a> ${suffix}</li>`
+            : `<li>${escapeHtml(a.filename)} ${suffix} <span class="tag">metadata only</span></li>`;
+        })
         .join('')}</ul></div>`
     : '';
 
