@@ -1,22 +1,24 @@
 /**
  * Provider registry.
  *
- * The app supports two interchangeable mailbox providers:
+ * The app supports three interchangeable mailbox providers:
  *   - `selfhosted`: this app's own SMTP server + in-memory store.
  *   - `guerrilla`:  Guerrilla Mail's public JSON API (opt-out via ENABLE_GUERRILLA).
+ *   - `resend`:     Resend inbound, RECEIVE-ONLY (opt-out via ENABLE_RESEND).
  *
  * Every provider implements the same surface:
  *   listDomains, createMailbox, listMailboxes, getMailbox, listMessages,
  *   getMessage, deleteMessage, deleteMailbox, extendMailbox, getAttachment,
- *   markSessionActive (optional), start/stop (optional)
+ *   markSessionActive (optional), start/stop (optional), status (optional)
  * plus a `capabilities` object the UI uses to decide what to show.
  */
 import { normalizeDomain } from '../mailboxes.js';
 import { providerError } from './errors.js';
 import { createGuerrillaProvider } from './guerrilla.js';
+import { createResendProvider } from './resend.js';
 import { createSelfHostedProvider } from './selfhosted.js';
 
-export function createProviders({ store, config, guerrillaClient, logger } = {}) {
+export function createProviders({ store, config, guerrillaClient, resendClient, logger } = {}) {
   const providers = new Map();
 
   const selfHosted = createSelfHostedProvider({ store, config });
@@ -30,6 +32,18 @@ export function createProviders({ store, config, guerrillaClient, logger } = {})
       logger,
     });
     providers.set(guerrilla.id, guerrilla);
+  }
+
+  // Resend is only offered when it is enabled AND at least one receiving domain
+  // is configured; with no domains there would be nothing to choose from.
+  if (config.resend?.enabled && (config.resend.domains?.length ?? 0) > 0) {
+    const resend = createResendProvider({
+      store,
+      config,
+      client: resendClient,
+      logger,
+    });
+    providers.set(resend.id, resend);
   }
 
   function get(id) {
@@ -82,6 +96,8 @@ export function createProviders({ store, config, guerrillaClient, logger } = {})
         description: provider.description,
         capabilities: provider.capabilities,
         domains: provider.listDomains(),
+        // Optional runtime availability (e.g. Resend quota or missing secrets).
+        status: provider.status ? provider.status() : { available: true },
       }));
     },
 
