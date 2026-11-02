@@ -18,6 +18,12 @@ export const TEST_ENV = {
   GUERRILLA_MIN_REQUEST_INTERVAL_MS: '0',
   GUERRILLA_MIN_SYNC_INTERVAL_MS: '2000',
   GUERRILLA_REQUEST_TIMEOUT_MS: '2000',
+  // The Resend provider is off unless a test opts in explicitly, so the
+  // existing provider expectations in the suite are unchanged.
+  ENABLE_RESEND: 'false',
+  RESEND_REQUEST_TIMEOUT_MS: '2000',
+  RESEND_MAX_RETRIES: '0',
+  RESEND_RETRY_BASE_MS: '0',
 };
 
 export const SESSION = 'session-test-0001';
@@ -32,6 +38,7 @@ export function makeSetup(envOverrides = {}, options = {}) {
     store,
     config,
     guerrillaClient: options.guerrillaClient,
+    resendClient: options.resendClient,
     logger: options.logger ?? { warn() {} },
   });
   const app = createApp({ store, config, providers });
