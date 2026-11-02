@@ -111,6 +111,29 @@ server.listen(config.port, config.host, () => {
       `[resend] receive-only provider on: ${config.resend.domains.join(', ')} (webhook POST ${config.resend.webhookPath})`,
     );
   }
+
+  // Make configured-but-unusable providers loud in the console. They are also
+  // flagged in GET /api/domains, but the reason is easy to miss there.
+  for (const provider of providers.list()) {
+    const status = provider.status?.();
+    if (status && status.available === false) {
+      console.warn(
+        `[${provider.id}] unavailable: ${status.reason ?? 'unknown reason'} ` +
+          '(note: .env is read once at boot — restart the server after editing it)',
+      );
+    }
+  }
+
+  // Probe the Resend key once, out of band, so a rejected key (e.g. a
+  // sending-only key) is reported here instead of only when a mail arrives.
+  Promise.resolve()
+    .then(() => providers.get('resend')?.checkCredentials?.())
+    .then((verdict) => {
+      if (verdict?.ok === false && verdict.reason !== 'not-configured') {
+        console.warn(`[resend] unavailable: ${verdict.reason}`);
+      }
+    })
+    .catch(() => {});
 });
 
 smtpServer.listen(config.smtp.port, config.smtp.host, () => {

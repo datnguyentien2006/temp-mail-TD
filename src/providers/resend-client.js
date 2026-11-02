@@ -26,6 +26,21 @@ function delay(ms) {
   });
 }
 
+/**
+ * Read the machine-readable `name` from a Resend error body. Never echoes the
+ * request or the API key; Resend's errors look like
+ * `{ statusCode, message, name }` and `name` is the real cause (e.g.
+ * `restricted_api_key`).
+ */
+async function readErrorName(response) {
+  try {
+    const json = JSON.parse(await response.text());
+    return typeof json?.name === 'string' ? json.name : '';
+  } catch {
+    return '';
+  }
+}
+
 export function createResendClient(cfg, { fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new Error('A fetch implementation is required for the Resend client.');
@@ -84,9 +99,17 @@ export function createResendClient(cfg, { fetchImpl = globalThis.fetch } = {}) {
       if (response.status === 404) return null;
 
       if (response.status === 401 || response.status === 403) {
+        const name = await readErrorName(response);
+        if (name === 'restricted_api_key') {
+          throw providerError(
+            502,
+            'Resend rejected the API key: it is restricted to sending only, so it cannot read received mail. Create a key with full access and set RESEND_API_KEY.',
+            'RESEND_AUTH',
+          );
+        }
         throw providerError(
           502,
-          'Resend rejected the API key. Check RESEND_API_KEY and its permissions.',
+          'Resend rejected the API key. Check RESEND_API_KEY and its permissions (a full-access key is required).',
           'RESEND_AUTH',
         );
       }

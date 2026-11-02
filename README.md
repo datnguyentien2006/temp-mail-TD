@@ -284,8 +284,11 @@ option that cannot work.
   and never processed; non-`email.received` events are acknowledged and ignored; processing happens
   after a `202` so Resend does not time out and retry.
 - **Required key permission:** `full_access`. A `sending_access` key cannot call the receiving
-  retrieve endpoint. Secrets (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`) live only in the environment
-  and are never logged or returned to clients.
+  retrieve endpoint. A sending-only key is detected and reported specifically: at startup the server
+  probes the key once (a bogus id — a `404` means the key is usable, `401/403` means it is not) and
+  logs the reason, and `/api/domains` reports the provider as unavailable with the same reason until
+  a request succeeds. Secrets (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`) live only in the
+  environment and are never logged or returned to clients.
 - **Unknown or expired recipients are dropped silently** — no bounce, no reveal. Duplicate webhooks
   (same `email_id`) are processed once; a `svix-timestamp` outside
   `RESEND_SIGNATURE_TOLERANCE_MS` is rejected (replay protection).

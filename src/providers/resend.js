@@ -110,6 +110,13 @@ export function createResendProvider({ store, config, client, logger = console }
   /** email_id -> expiry timestamp, so webhook retries are processed once. */
   const seen = new Map();
 
+  /**
+   * Set when Resend rejects the API key (e.g. a sending-only key). Cleared on
+   * the next successful call. Surfaced through /api/domains so the reason is
+   * visible instead of a message silently failing to ingest.
+   */
+  let lastAuthError = null;
+
   function isResend(mailbox) {
     return mailbox?.provider === 'resend';
   }
@@ -151,6 +158,9 @@ export function createResendProvider({ store, config, client, logger = console }
     if (!cfg.webhookSecret) {
       return { available: false, reason: 'RESEND_WEBHOOK_SECRET is not configured.' };
     }
+    // A key Resend has already refused will keep refusing: report it rather
+    // than letting every webhook fail silently.
+    if (lastAuthError) return { available: false, reason: lastAuthError };
     const state = quota.state();
     if (state.level === 'hard') {
       return {
@@ -207,7 +217,14 @@ export function createResendProvider({ store, config, client, logger = console }
       return { accepted: true, stored: 0, reason: 'quota', quota: reservation.state };
     }
 
-    const body = await api.getReceivedEmail(emailId, { htmlFormat: 'data_uri' });
+    let body;
+    try {
+      body = await api.getReceivedEmail(emailId, { htmlFormat: 'data_uri' });
+      lastAuthError = null;
+    } catch (error) {
+      if (error?.code === 'RESEND_AUTH') lastAuthError = error.message;
+      throw error;
+    }
     if (!body) {
       seen.set(emailId, now + cfg.dedupeTtlMs);
       return { accepted: true, stored: 0, reason: 'gone' };
@@ -377,6 +394,27 @@ export function createResendProvider({ store, config, client, logger = console }
 
     markSessionActive() {
       // Nothing to poll: mail is pushed by webhook.
+    },
+
+    /**
+     * Fire-and-forget startup probe: a bogus id makes Resend answer 404 when
+     * the key is usable, or 401/403 when it is not (e.g. a sending-only key).
+     * A 404 does not count against the quota. Transient errors are ignored.
+     */
+    async checkCredentials() {
+      if (!cfg.enabled || !cfg.apiKey) return { ok: false, reason: 'not-configured' };
+      try {
+        await api.getReceivedEmail('startup-credential-check', { htmlFormat: 'data_uri' });
+        lastAuthError = null;
+        return { ok: true };
+      } catch (error) {
+        if (error?.code === 'RESEND_AUTH') {
+          lastAuthError = error.message;
+          note(`API key rejected: ${error.message}`);
+          return { ok: false, reason: error.message };
+        }
+        return { ok: true, note: 'probe inconclusive' };
+      }
     },
 
     /** Verify a webhook request against the raw body and the signing secret. */

@@ -529,6 +529,23 @@ test('the Resend client surfaces 429, 401 and timeouts as safe errors', async ()
     return true;
   });
 
+  // A sending-only key must be called out specifically: it can never read mail.
+  const restricted = createResendClient(CLIENT_CFG, {
+    fetchImpl: async () =>
+      response(401, {
+        statusCode: 401,
+        message: 'This API key is restricted to only send emails',
+        name: 'restricted_api_key',
+      }),
+  });
+  await assert.rejects(restricted.getReceivedEmail('abc'), (error) => {
+    assert.equal(error.code, 'RESEND_AUTH');
+    assert.match(error.message, /restricted to sending only/i);
+    assert.match(error.message, /full access/i);
+    assert.doesNotMatch(error.message, /re_test_key/);
+    return true;
+  });
+
   const timedOut = createResendClient(CLIENT_CFG, {
     fetchImpl: async () => {
       throw new Error('The operation was aborted');
@@ -538,6 +555,48 @@ test('the Resend client surfaces 429, 401 and timeouts as safe errors', async ()
     assert.equal(error.code, 'RESEND_UNAVAILABLE');
     return true;
   });
+});
+
+test('a key Resend refuses makes the provider report itself unavailable', async () => {
+  const { app, providers, fake } = setupResend();
+  const created = await createResendMailbox(app);
+  assert.equal(providers.get('resend').status().available, true);
+
+  fake.fail = 401; // Resend refuses the key
+  await assert.rejects(
+    providers.get('resend').handleReceivedEvent(receivedEvent({ to: [created.body.address] })),
+  );
+
+  const status = providers.get('resend').status();
+  assert.equal(status.available, false);
+  assert.match(status.reason, /rejected the API key/i);
+
+  const listed = await request(app).get('/api/domains');
+  const resend = listed.body.providers.find((p) => p.id === 'resend');
+  assert.equal(resend.status.available, false);
+
+  // A later success clears the flag.
+  fake.fail = null;
+  fake.bodies.set('em-1', receivedBody());
+  await providers.get('resend').handleReceivedEvent(receivedEvent({ to: [created.body.address] }));
+  assert.equal(providers.get('resend').status().available, true);
+});
+
+test('checkCredentials probes the key out of band (404 = usable, 401 = rejected)', async () => {
+  const { app, providers, fake } = setupResend();
+  const provider = providers.get('resend');
+  await createResendMailbox(app);
+
+  // 404 for the bogus probe id means the key was accepted.
+  const ok = await provider.checkCredentials();
+  assert.equal(ok.ok, true);
+  assert.equal(fake.calls.at(-1).path, '/emails/receiving/startup-credential-check');
+
+  fake.fail = 401;
+  const bad = await provider.checkCredentials();
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /rejected the API key/i);
+  assert.equal(provider.status().available, false);
 });
 
 test('ingest survives a failing fetch without crashing', async () => {
