@@ -72,9 +72,6 @@ store.on('mailbox:extended', (mailbox) => {
 
 // --- SMTP --------------------------------------------------------------
 const smtpServer = createSmtpServer({ store, config });
-smtpServer.on('error', (err) => {
-  console.error('[smtp] server error:', err.message);
-});
 
 // --- Background cleanup ------------------------------------------------
 store.startSweeper(config.sweepIntervalMs);
@@ -88,6 +85,28 @@ if (config.domains.length === 0) {
     '[config] DOMAINS is empty. Set DOMAINS=example.com,example.net in your environment/.env before creating mailboxes.',
   );
 }
+
+// A port clash is the most common startup failure, and the default crash dumps
+// a stack from the WebSocketServer that says nothing useful. Report it plainly.
+function reportListenError(err, label, port) {
+  if (err.code === 'EADDRINUSE') {
+    console.error(
+      `[${label}] port ${port} is already in use. Another instance is probably still running.\n` +
+        `  Windows: netstat -ano | findstr :${port}   then   taskkill /PID <pid> /F\n` +
+        `  macOS/Linux: lsof -i :${port}   then   kill <pid>\n` +
+        `  Or start on another port: PORT=3001 npm start`,
+    );
+  } else if (err.code === 'EACCES') {
+    console.error(`[${label}] port ${port} needs elevated privileges. Use a port above 1024.`);
+  } else {
+    console.error(`[${label}] failed to listen on ${port}: ${err.message}`);
+  }
+  process.exit(1);
+}
+
+server.on('error', (err) => reportListenError(err, 'http', config.port));
+wss.on('error', (err) => reportListenError(err, 'ws', config.port));
+smtpServer.on('error', (err) => reportListenError(err, 'smtp', config.smtp.port));
 
 server.listen(config.port, config.host, () => {
   console.log(`[http] Temp Mail UI/API on http://${config.host}:${config.port}`);
