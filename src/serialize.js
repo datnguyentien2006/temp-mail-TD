@@ -10,6 +10,7 @@ export function toPublicMailbox(mailbox) {
     address: mailbox.address,
     localPart: mailbox.localPart,
     domain: mailbox.domain,
+    provider: mailbox.provider || 'selfhosted',
     createdAt: mailbox.createdAt,
     expiresAt: mailbox.expiresAt,
     extendCount: mailbox.extendCount ?? 0,

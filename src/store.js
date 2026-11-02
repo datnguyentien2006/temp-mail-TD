@@ -34,7 +34,15 @@ export class MailboxStore extends EventEmitter {
     return this.sessions.get(sessionId)?.size ?? 0;
   }
 
-  createMailbox({ address, localPart, domain, sessionId, ttlMs = this.ttlMs }) {
+  createMailbox({
+    address,
+    localPart,
+    domain,
+    sessionId,
+    provider = 'selfhosted',
+    providerData = null,
+    ttlMs = this.ttlMs,
+  }) {
     const key = String(address).toLowerCase();
 
     if (this.mailboxes.has(key)) {
@@ -55,6 +63,8 @@ export class MailboxStore extends EventEmitter {
       localPart,
       domain,
       sessionId,
+      provider,
+      providerData,
       createdAt: now,
       expiresAt: now + ttlMs,
       extendCount: 0,
