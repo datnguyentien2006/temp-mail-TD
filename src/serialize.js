@@ -3,6 +3,7 @@
  * client-facing JSON. Attachment bytes are never sent in list/detail
  * responses; they are fetched on demand from the download endpoint.
  */
+import { extractLinks } from './links.js';
 
 export function toPublicMailbox(mailbox) {
   return {
@@ -49,5 +50,9 @@ export function toPublicMessage(message) {
     ...toPublicMessageSummary(message),
     text: message.text ?? '',
     html: message.html ?? '',
+    // Machine-readable links for both the UI ("Links in this email") and
+    // automation agents that need to open the verification URL. Only the
+    // detail payload carries the body, so only it can extract links.
+    links: extractLinks(message.html, message.text),
   };
 }

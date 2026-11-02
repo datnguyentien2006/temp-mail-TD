@@ -49,6 +49,53 @@ function wrap(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
+/** Maximum `?wait=` seconds honoured by the messages long-poll. */
+const MAX_WAIT_MS = 60 * 1000;
+
+/**
+ * Parse `?wait=` (seconds, capped at 60) into milliseconds. Anything invalid
+ * or non-positive means "do not wait" so the default behaviour is unchanged.
+ */
+function parseWaitMs(raw) {
+  if (raw === undefined || raw === null || raw === '') return 0;
+  const seconds = Number.parseFloat(String(raw));
+  if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+  return Math.min(Math.round(seconds * 1000), MAX_WAIT_MS);
+}
+
+/**
+ * Resolve when the mailbox has more stored messages than `baselineCount`, or
+ * when `waitMs` elapses. Every provider funnels new mail through
+ * `store.addMessage`, which emits `message`, so one listener covers
+ * self-hosted, Guerrilla and Resend.
+ *
+ * @returns {Promise<boolean>} true if it timed out, false if mail arrived.
+ */
+function waitForNewMessage(store, address, baselineCount, waitMs) {
+  const mailbox = store.get(address);
+  if (!mailbox || mailbox.messages.length > baselineCount) return Promise.resolve(false);
+
+  const key = String(address).toLowerCase();
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = (timedOut) => {
+      if (settled) return;
+      settled = true;
+      store.off('message', onMessage);
+      if (timer) clearTimeout(timer);
+      resolve(timedOut);
+    };
+    const onMessage = (payload) => {
+      const eventAddress = payload?.mailbox?.address ?? payload?.address;
+      if (String(eventAddress ?? '').toLowerCase() === key) finish(false);
+    };
+    store.on('message', onMessage);
+    timer = setTimeout(() => finish(true), waitMs);
+    timer.unref?.();
+  });
+}
+
 export function createRouter({ store, config, providers }) {
   const router = Router();
   const createLimiter = createCreateLimiter(config);
@@ -175,12 +222,22 @@ export function createRouter({ store, config, providers }) {
       const mailbox = ownedMailbox(address, sessionId);
       if (!mailbox) return res.status(404).json({ error: 'Mailbox not found.' });
 
+      // Optional long-poll: `?wait=<seconds>` holds the request open until a
+      // genuinely new message lands (or the timeout fires), so an automation
+      // agent can ask for "the next message" instead of hammering this route.
+      const waitMs = parseWaitMs(req.query.wait);
+      let timedOut = false;
+      if (waitMs > 0) {
+        timedOut = await waitForNewMessage(store, address, mailbox.messages.length, waitMs);
+      }
+
       const messages = await providers
         .forMailbox(mailbox)
         .listMessages(address, sessionId);
       return res.json({
         mailbox: toPublicMailbox(store.get(address) ?? mailbox),
         messages: messages.map(toPublicMessageSummary),
+        ...(waitMs > 0 ? { waited: true, timedOut } : {}),
       });
     }),
   );

@@ -254,6 +254,29 @@ main { flex: 1; display: flex; min-height: 0; }
 .attachments { margin-top: 12px; }
 .attachments a { color: var(--accent); }
 
+/* Links in this email - rendered outside the sandboxed body iframe. */
+.links-panel {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.links-panel .links-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.links-panel .links-head .muted { color: var(--muted); font-size: 0.78rem; }
+.links-panel ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.links-panel li { padding: 4px 0; border-top: 1px solid var(--border); min-width: 0; }
+.links-panel li:first-child { border-top: 0; }
+.links-panel a { color: var(--accent); word-break: break-all; font-weight: 600; }
+.links-panel .link-url {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  word-break: break-all;
+  margin-top: 2px;
+}
+
 .hint { color: var(--muted); font-size: 0.82rem; }
 .empty { color: var(--muted); padding: 16px; }
 

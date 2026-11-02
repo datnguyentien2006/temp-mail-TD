@@ -99,6 +99,16 @@ function escapeHtml(value) {
   })[c]);
 }
 
+/** Return the URL only if it is an absolute http(s) URL, else null. */
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value ?? ''));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function formatTime(ts) {
   return new Date(Number(ts) || Date.now()).toLocaleString();
 }
@@ -562,6 +572,31 @@ function renderMessageView(msg) {
         .join('')}</ul></div>`
     : '';
 
+  // "Links in this email": rendered in the app chrome (outside the sandboxed
+  // iframe) so verification links are always clickable, and the full
+  // destination is shown so a link cannot masquerade via its anchor text.
+  const links = Array.isArray(msg.links) ? msg.links : [];
+  const safeLinks = links
+    .map((link) => ({ url: safeHttpUrl(link?.url), text: String(link?.text ?? '') }))
+    .filter((link) => link.url);
+  const linksHtml = safeLinks.length
+    ? `<div class="links-panel">
+        <div class="links-head">
+          <strong>Links in this email</strong>
+          <span class="muted">Check the destination before opening.</span>
+        </div>
+        <ul>${safeLinks
+          .map((link) => {
+            const label = link.text.trim() ? escapeHtml(link.text) : escapeHtml(link.url);
+            return `<li>
+              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer nofollow">${label}</a>
+              <span class="link-url">${escapeHtml(link.url)}</span>
+            </li>`;
+          })
+          .join('')}</ul>
+      </div>`
+    : '';
+
   el.messageView.innerHTML = `
     <header>
       <h3>${escapeHtml(msg.subject)}</h3>
@@ -571,13 +606,20 @@ function renderMessageView(msg) {
         <div><strong>Date:</strong> ${escapeHtml(formatTime(msg.date ? Date.parse(msg.date) : msg.receivedAt))}</div>
       </div>
     </header>
+    ${linksHtml}
     <div id="bodyHost"></div>
     ${attachmentHtml}`;
 
   const host = el.messageView.querySelector('#bodyHost');
   if (msg.html) {
     const iframe = document.createElement('iframe');
-    iframe.setAttribute('sandbox', ''); // no scripts, no same-origin
+    // Scripts and same-origin access stay disabled. We only allow links to
+    // open: without `allow-popups`, a `target="_blank"` click is silently
+    // dropped by the sandbox and the email's links do nothing.
+    iframe.setAttribute(
+      'sandbox',
+      'allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation',
+    );
     iframe.setAttribute('referrerpolicy', 'no-referrer');
     iframe.srcdoc = msg.html; // already sanitised by the server
     iframe.addEventListener('load', () => {

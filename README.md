@@ -33,7 +33,10 @@ straight into the browser.
 - **Temporary by design** — every mailbox and its messages expire after a configurable TTL, with a
   background cleanup job that also tells the UI when an address is gone.
 - **Safe HTML rendering** — HTML from either provider is sanitised server-side and rendered inside a
-  sandboxed iframe (no scripts, no same-origin).
+  sandboxed iframe (scripts and same-origin stay disabled).
+- **Clickable links** — a *Links in this email* panel lists every http(s) link with its full
+  destination, so verification links can be opened in one click without trusting anchor text. The
+  same list is exposed as a machine-readable `links[]` array on the message detail endpoint.
 - **Attachments** — self-hosted mail lists name/size/type and downloads on demand; Resend mail lists
   metadata only (bytes are never fetched) and Guerrilla exposes none.
 - **Convenience** — copy-address button and an on-demand QR code for the active address.
@@ -158,7 +161,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `SMTP_TLS_KEY` / `SMTP_TLS_CERT` | *(empty)* | Set **both** to enable STARTTLS on inbound SMTP |
 | `MAILBOX_TTL_MINUTES` | `30` | Mailbox lifetime |
 | `MAX_MAILBOX_LIFETIME_MINUTES` | `4 × TTL` | Hard ceiling on a mailbox's total life (caps `extend`) |
-| `MAX_MAILBOXES_PER_SESSION` | `5` | Per-browser cap on simultaneous inboxes |
+| `MAX_MAILBOXES_PER_SESSION` | `100` | Per-browser cap on simultaneous inboxes |
 | `SWEEP_INTERVAL_MS` | `60000` | Cleanup job interval |
 | `POLL_INTERVAL_MS` | `8000` | Client polling interval when the WebSocket is unavailable |
 | `CREATE_RATE_LIMIT_WINDOW_MS` | `600000` | Creation rate-limit window |
@@ -346,8 +349,8 @@ All endpoints except `/api/health`, `/api/config` and `/api/domains` require the
 | `DELETE` | `/api/mailboxes/:address` | Delete a mailbox (Guerrilla: best-effort `forget_me`; Resend: local only) |
 | `POST` | `/api/mailboxes/:address/extend` | Extend a **self-hosted** or **Resend** mailbox by one TTL (capped by `MAX_MAILBOX_LIFETIME_MINUTES`); `400` for Guerrilla |
 | `GET` | `/api/mailboxes/:address/qr` | QR code for the address as an SVG data URL (any provider) |
-| `GET` | `/api/mailboxes/:address/messages` | List message summaries (syncs Guerrilla inboxes first) |
-| `GET` | `/api/mailboxes/:address/messages/:id` | Full message (sanitised HTML + text; fetches the Guerrilla body on demand) |
+| `GET` | `/api/mailboxes/:address/messages` | List message summaries (syncs Guerrilla inboxes first). Optional long-poll: `?wait=<seconds>` (max 60) holds the request until a **new** message arrives or the timeout fires, returning `{ waited: true, timedOut }` |
+| `GET` | `/api/mailboxes/:address/messages/:id` | Full message: sanitised `html`, `text`, attachments and a machine-readable `links[]` array (`{ url, text }`, http(s) only, deduplicated) |
 | `DELETE` | `/api/mailboxes/:address/messages/:id` | Delete a message (also removes it remotely for Guerrilla; Resend: local only) |
 | `GET` | `/api/mailboxes/:address/messages/:id/attachments/:index` | Download a **self-hosted** attachment; `400` for Guerrilla and Resend |
 | `POST` | `/api/webhooks/resend` | Resend inbound webhook (`email.received`). Signature-verified over the raw body; not session-authenticated |
@@ -378,6 +381,31 @@ curl -s -X POST http://localhost:3000/api/mailboxes \
   -d '{"provider":"resend","domain":"inbox.example.com","localPart":"hello"}'
 ```
 
+### Driving the signup-verification workflow
+
+The API is enough for an external agent to create an address, hand it to a signup form, wait for the
+verification mail and pull the verification link — no server-side fetch of the target URL ever
+happens (the app would otherwise become an SSRF proxy):
+
+1. **Create** — `POST /api/mailboxes` and read `address` from the `201` response.
+2. **Register** — submit that address to the target site (the app's job ends here).
+3. **Wait** — `GET /api/mailboxes/<address>/messages?wait=60`; it blocks until the next message
+   arrives or 60 s pass (`timedOut: true`), so there is no busy-polling.
+4. **Read the link** — `GET /api/mailboxes/<address>/messages/<id>` and take `links[0].url` (the
+   `links[]` array is already http(s)-only, absolute and deduplicated).
+5. **Open it** from the agent's own network/browser, then `DELETE` the mailbox when done.
+
+```bash
+SID=demo-session-1234
+ADDR=$(curl -s -X POST http://localhost:3000/api/mailboxes \
+  -H "x-session-id: $SID" -H 'content-type: application/json' \
+  -d '{"provider":"selfhosted","localPart":"signup"}' | jq -r .address)
+
+# wait for the next message (up to 60 s), then print the first link
+MSG=$(curl -s "http://localhost:3000/api/mailboxes/$ADDR/messages?wait=60" -H "x-session-id: $SID" | jq -r '.messages[0].id')
+curl -s "http://localhost:3000/api/mailboxes/$ADDR/messages/$MSG" -H "x-session-id: $SID" | jq -r '.links[0].url'
+```
+
 ## Testing
 
 ```bash
@@ -389,6 +417,11 @@ rejected), local-part/custom-username rules, reserved names, mailbox creation / 
 deletion, session isolation, TTL eviction, expiry extension and its cap, the QR endpoint, **inbound
 mail over a real SMTP connection**, attachment capture, HTML sanitisation, and 550 rejection for
 unknown mailboxes and disallowed domains.
+
+Link tests (`test/links.test.js`) cover the extractor (anchor labels, http(s)-only filtering,
+deduplication, entity decoding, trailing-punctuation trimming, balanced parentheses, relative-link
+rejection) plus the API contract: `links[]` on the message detail endpoint and the
+`?wait=<seconds>` long-poll (resolves on arrival, times out cleanly).
 
 Provider tests (`test/providers.test.js`) use a **mocked Guerrilla HTTP client** — the suite never
 touches the real API. They cover the provider interface, grouped `/api/domains`, the kill switch,
@@ -449,8 +482,13 @@ typosquatted domains are used.
 
 ## Security
 
-- HTML email is sanitised with an allow-list **and** rendered in a sandboxed iframe (`sandbox=""`),
-  so scripts, event handlers and `javascript:` URLs cannot run.
+- HTML email is sanitised with an allow-list **and** rendered in a sandboxed iframe, so scripts,
+  event handlers and `javascript:` URLs cannot run. The sandbox only relaxes popups
+  (`allow-popups allow-popups-to-escape-sandbox`) so `target="_blank"` links work; same-origin and
+  scripts stay disabled.
+- The *Links in this email* panel is built entirely from the server-extracted `links[]` array, shows
+  the **full destination** for every link (not just the anchor text), and never fetches a URL
+  server-side — the app is not an open proxy.
 - Mailbox creation is rate-limited per IP and capped per session; local parts are validated and
   reserved names are refused.
 - SMTP rejects unknown recipients and non-allowed domains (no open relay, no backscatter).

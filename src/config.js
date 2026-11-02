@@ -69,7 +69,10 @@ export function loadConfig(env = process.env) {
     domains,
     ttlMinutes,
     ttlMs: ttlMinutes * 60 * 1000,
-    maxMailboxesPerSession: toInt(env.MAX_MAILBOXES_PER_SESSION, 5),
+    // Concurrent live inboxes allowed per browser session. The per-IP create
+    // rate limit above still applies, so this is a cap on how many addresses
+    // a single session can hold at once, not how fast they can be created.
+    maxMailboxesPerSession: toInt(env.MAX_MAILBOXES_PER_SESSION, 100),
     // Hard ceiling on how long a single mailbox may live, however often it is
     // extended. Defaults to 4x the base TTL.
     maxMailboxLifetimeMinutes,
