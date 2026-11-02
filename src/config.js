@@ -19,6 +19,12 @@ function toInt(value, fallback, { min = 1 } = {}) {
   return parsed;
 }
 
+function toFloat(value, fallback, { min = -Infinity, max = Infinity } = {}) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) return fallback;
+  return parsed;
+}
+
 function toBool(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   return !['false', '0', 'no', 'off'].includes(String(value).trim().toLowerCase());
@@ -40,6 +46,10 @@ export function loadConfig(env = process.env) {
     10000,
     toInt(env.GUERRILLA_POLL_INTERVAL_MS, 15000),
   );
+
+  // Third mailbox provider: Resend inbound (receive-only). The soft limit is a
+  // ratio of the hard limits so the UI can warn before the hard stop.
+  const resendSoftLimitRatio = toFloat(env.RESEND_SOFT_LIMIT_RATIO, 0.8, { min: 0.1, max: 1 });
 
   return {
     env: env.NODE_ENV || 'development',
@@ -102,6 +112,44 @@ export function loadConfig(env = process.env) {
       // Mail is retained by Guerrilla Mail for roughly one hour.
       retentionMinutes: toInt(env.GUERRILLA_RETENTION_MINUTES, 60),
       retentionMs: toInt(env.GUERRILLA_RETENTION_MINUTES, 60) * 60 * 1000,
+    },
+
+    // --- third provider: Resend inbound (receive-only) ----------------
+    // Mail is never sent by this app. Resend posts an `email.received`
+    // webhook; the backend fetches the body over the receiving API.
+    resend: {
+      // Kill switch: false removes the provider from /api/domains and the UI.
+      enabled: toBool(env.ENABLE_RESEND, true),
+      // Secrets live only here (from the environment) and are never logged,
+      // serialised or returned to clients.
+      apiKey: env.RESEND_API_KEY || '',
+      webhookSecret: env.RESEND_WEBHOOK_SECRET || '',
+      // Domains verified for receiving in Resend (custom domains and/or the
+      // account's <id>.resend.app subdomain). Never hardcode these.
+      domains: parseDomainList(env.RESEND_DOMAINS),
+      apiBase: env.RESEND_API_BASE || 'https://api.resend.com',
+      userAgent:
+        env.RESEND_USER_AGENT ||
+        'temp-mail-td/1.0 (self-hosted disposable mail; +https://github.com/datnguyentien2006/temp-mail-TD)',
+      requestTimeoutMs: toInt(env.RESEND_REQUEST_TIMEOUT_MS, 10000),
+      maxRetries: toInt(env.RESEND_MAX_RETRIES, 2, { min: 0 }),
+      retryBaseMs: toInt(env.RESEND_RETRY_BASE_MS, 500, { min: 0 }),
+      // Reject webhooks whose svix-timestamp is outside this window (replay
+      // protection). Set to 0 to disable the check.
+      signatureToleranceMs: toInt(env.RESEND_SIGNATURE_TOLERANCE_MS, 5 * 60 * 1000, { min: 0 }),
+      webhookPath: '/api/webhooks/resend',
+      webhookMaxBytes: toInt(env.RESEND_WEBHOOK_MAX_BYTES, 1024 * 1024),
+      dedupeTtlMs: toInt(env.RESEND_DEDUPE_TTL_MS, 24 * 60 * 60 * 1000),
+      // Free plan: 100/day and 3,000/month, shared with sent mail.
+      dailyLimit: toInt(env.RESEND_DAILY_LIMIT, 100),
+      monthlyLimit: toInt(env.RESEND_MONTHLY_LIMIT, 3000),
+      softLimitRatio: resendSoftLimitRatio,
+      maxMessagesPerMailbox: toInt(env.RESEND_MAX_MESSAGES_PER_MAILBOX, 50),
+      maxMessagesPerSender: toInt(env.RESEND_MAX_MESSAGES_PER_SENDER, 20),
+      // This app keeps mail only for the mailbox lifetime; Resend itself keeps
+      // received mail for about 30 days.
+      retentionMinutes: ttlMinutes,
+      retentionMs: ttlMinutes * 60 * 1000,
     },
   };
 }
