@@ -106,6 +106,11 @@ server.listen(config.port, config.host, () => {
       `[guerrilla] enabled; polling open inboxes every ${config.guerrilla.pollIntervalMs} ms`,
     );
   }
+  if (config.resend.enabled && config.resend.domains.length > 0) {
+    console.log(
+      `[resend] receive-only provider on: ${config.resend.domains.join(', ')} (webhook POST ${config.resend.webhookPath})`,
+    );
+  }
 });
 
 smtpServer.listen(config.smtp.port, config.smtp.host, () => {

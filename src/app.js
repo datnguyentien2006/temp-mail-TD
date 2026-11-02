@@ -6,6 +6,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './routes.js';
+import { createWebhookRouter } from './webhooks.js';
 import { createProviders } from './providers/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,8 +29,6 @@ export function createApp({ store, config, providers }) {
   app.disable('x-powered-by');
   if (config.trustProxy) app.set('trust proxy', 1);
 
-  app.use(express.json({ limit: '100kb' }));
-
   // Minimal security headers (no helmet dependency needed for this app).
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -37,6 +36,12 @@ export function createApp({ store, config, providers }) {
     res.setHeader('X-Frame-Options', 'DENY');
     next();
   });
+
+  // Webhook endpoints must see the RAW request body to verify signatures, so
+  // they are mounted before the JSON body parser.
+  app.use(createWebhookRouter({ store, config, providers: mailboxProviders }));
+
+  app.use(express.json({ limit: '100kb' }));
 
   if (config.corsOrigin) app.use(corsMiddleware(config.corsOrigin));
 
