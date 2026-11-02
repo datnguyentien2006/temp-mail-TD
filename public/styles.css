@@ -282,6 +282,38 @@ main { flex: 1; display: flex; min-height: 0; }
 .qr-body img { background: #fff; border-radius: 8px; padding: 8px; width: 240px; height: 240px; }
 .qr-body .addr { display: block; margin-top: 10px; font-size: 0.9rem; }
 
+/* ---------------------------------------------------------- providers */
+.provider-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--accent-2);
+  font-size: 0.68rem;
+  font-weight: 600;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.provider-notice {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 4px 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-2);
+  border-radius: 8px;
+  background: rgba(34, 211, 238, 0.06);
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+.provider-notice[hidden] { display: none; }
+.provider-notice strong { color: var(--accent-2); }
+
 @media (max-width: 820px) {
   main { flex-direction: column; }
   .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); max-height: 260px; }

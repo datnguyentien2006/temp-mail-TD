@@ -7,11 +7,11 @@
 const SESSION_KEY = 'tempmail.sessionId';
 const HISTORY_KEY = 'tempmail.history';
 const HISTORY_MAX = 20;
-const RANDOM_DOMAIN = ''; // empty option value => let the server pick
 
 const state = {
   sessionId: getSessionId(),
   domains: [],
+  providers: [],
   ttlMinutes: 30,
   maxMailboxLifetimeMinutes: 120,
   maxMailboxes: 5,
@@ -42,6 +42,7 @@ const el = {
   extendBtn: document.getElementById('extendBtn'),
   ttl: document.getElementById('ttl'),
   status: document.getElementById('status'),
+  providerNotice: document.getElementById('providerNotice'),
   messageList: document.getElementById('messageList'),
   messageView: document.getElementById('messageView'),
   qrModal: document.getElementById('qrModal'),
@@ -133,6 +134,29 @@ async function api(path, options = {}) {
 }
 
 /* ---------------------------------------------------------------- init */
+function providerById(id) {
+  return state.providers.find((provider) => provider.id === id) || null;
+}
+
+function selectedProviderId() {
+  const value = el.domainSelect.value || '';
+  const index = value.indexOf(':');
+  return index < 0 ? '' : value.slice(0, index);
+}
+
+function providerLabel(id) {
+  return providerById(id)?.label || id || 'provider';
+}
+
+function providerCapabilities(id) {
+  return providerById(id)?.capabilities || {};
+}
+
+function providerTag(id) {
+  if (!id || id === 'selfhosted') return '';
+  return `<span class="provider-tag">${escapeHtml(providerLabel(id))}</span>`;
+}
+
 async function init() {
   try {
     const cfg = await api('/api/config');
@@ -141,10 +165,33 @@ async function init() {
     state.maxMailboxLifetimeMinutes = cfg.maxMailboxLifetimeMinutes || state.ttlMinutes * 4;
     state.maxMailboxes = cfg.maxMailboxesPerSession || 5;
     state.pollIntervalMs = cfg.pollIntervalMs || 8000;
-    renderDomainOptions();
   } catch (err) {
     setStatus(`Could not load config: ${err.message}`, 'error');
   }
+
+  try {
+    const data = await api('/api/domains');
+    state.providers = Array.isArray(data.providers) ? data.providers : [];
+  } catch (err) {
+    // Backwards-compatible fallback: treat the flat list as self-hosted.
+    state.providers = state.domains.length
+      ? [{
+        id: 'selfhosted',
+        label: 'Self-hosted mail',
+        description: '',
+        domains: state.domains,
+        capabilities: {
+          supportsDomainChoice: true,
+          supportsCustomLocalPart: true,
+          supportsExtend: true,
+          retentionMinutes: state.ttlMinutes,
+        },
+      }]
+      : [];
+    setStatus(`Could not load providers: ${err.message}`, 'error');
+  }
+
+  renderDomainOptions();
   await refreshMailboxes();
   connectSocket();
   setInterval(tickTtl, 1000);
@@ -155,41 +202,96 @@ async function init() {
 function renderDomainOptions() {
   el.domainSelect.innerHTML = '';
 
-  const random = document.createElement('option');
-  random.value = RANDOM_DOMAIN;
-  random.textContent = 'Random domain';
-  el.domainSelect.appendChild(random);
-
-  for (const domain of state.domains) {
-    const opt = document.createElement('option');
-    opt.value = domain;
-    opt.textContent = domain;
-    el.domainSelect.appendChild(opt);
+  if (state.providers.length === 0) {
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'No mailbox providers enabled';
+    none.disabled = true;
+    el.domainSelect.appendChild(none);
+    return;
   }
 
-  if (state.domains.length === 0) {
-    el.newBtn.disabled = true;
-    setStatus('No domains configured on the server (set DOMAINS).', 'error');
+  for (const provider of state.providers) {
+    const caps = provider.capabilities || {};
+    const group = document.createElement('optgroup');
+    group.label = provider.label || provider.id;
+
+    const domains = Array.isArray(provider.domains) ? provider.domains : [];
+    if (caps.supportsDomainChoice !== false && domains.length > 0) {
+      const random = document.createElement('option');
+      random.value = `${provider.id}:`;
+      random.textContent = `Random ${provider.label || 'provider'} domain`;
+      group.appendChild(random);
+
+      for (const domain of domains) {
+        const option = document.createElement('option');
+        option.value = `${provider.id}:${domain}`;
+        option.textContent = domain;
+        group.appendChild(option);
+      }
+    } else if (caps.supportsDomainChoice !== false) {
+      // Provider supports domain choice, but the server has none configured.
+      const empty = document.createElement('option');
+      empty.value = `${provider.id}:`;
+      empty.textContent = '(no domains configured)';
+      empty.disabled = true;
+      group.appendChild(empty);
+    } else {
+      // Domain choice is not available: do not fake a list.
+      const random = document.createElement('option');
+      random.value = `${provider.id}:`;
+      random.textContent = `Random (${provider.label || provider.id})`;
+      group.appendChild(random);
+    }
+
+    el.domainSelect.appendChild(group);
   }
+
+  syncFormToProvider();
+}
+
+function syncFormToProvider() {
+  const caps = providerCapabilities(selectedProviderId());
+  const supported = caps.supportsCustomLocalPart !== false;
+  el.localPartInput.disabled = !supported;
+  el.localPartInput.placeholder = supported ? 'custom name (optional)' : 'custom name not supported';
+  if (!supported) el.localPartInput.value = '';
+}
+
+function hasCreatableOption() {
+  return state.providers.some((provider) => {
+    const caps = provider.capabilities || {};
+    if (caps.supportsDomainChoice === false) return true;
+    return Array.isArray(provider.domains) && provider.domains.length > 0;
+  });
 }
 
 function updateCreateAvailability() {
   const full = state.mailboxes.length >= state.maxMailboxes;
-  el.newBtn.disabled = state.domains.length === 0 || full;
+  const canCreate = hasCreatableOption();
+  el.newBtn.disabled = !canCreate || full;
   el.mailboxCount.textContent = `${state.mailboxes.length}/${state.maxMailboxes}`;
-  if (full) {
+  if (!canCreate) {
+    setStatus('No mailbox provider is available.', 'error');
+  } else if (full) {
     setStatus(`Limit reached (${state.maxMailboxes} active inboxes). Delete one to create another.`);
   }
 }
 
 /* ---------------------------------------------------- mailbox lifecycle */
+el.domainSelect.addEventListener('change', syncFormToProvider);
+
 el.form.addEventListener('submit', async (event) => {
   event.preventDefault();
   el.newBtn.disabled = true;
   setStatus('Creating address...');
   try {
     const localPart = el.localPartInput.value.trim();
-    const payload = { domain: el.domainSelect.value };
+    const selected = el.domainSelect.value || '';
+    const sep = selected.indexOf(':');
+    const provider = sep < 0 ? '' : selected.slice(0, sep);
+    const domain = sep < 0 ? selected : selected.slice(sep + 1);
+    const payload = { provider, domain };
     if (localPart) payload.localPart = localPart;
 
     const mailbox = await api('/api/mailboxes', { method: 'POST', body: JSON.stringify(payload) });
@@ -237,6 +339,7 @@ function renderTabs() {
     const { local } = splitAddress(mailbox.address);
     tab.innerHTML = `
       <span class="dot"></span>
+      ${providerTag(mailbox.provider)}
       <span class="local">${escapeHtml(local)}</span>
       <span class="n">${mailbox.messageCount}</span>
       <span class="x" title="Delete">✕</span>`;
@@ -264,6 +367,7 @@ function renderMailboxes() {
       <span>
         <span class="local">${escapeHtml(local)}</span>
         <span class="domain">@${escapeHtml(domain)}</span>
+        ${providerTag(mailbox.provider)}
       </span>
       <span class="count">${mailbox.messageCount}</span>
       <button class="icon-btn" title="Delete" aria-label="Delete">✕</button>`;
@@ -284,7 +388,8 @@ function renderHistory() {
   el.historyHint.style.display = state.history.length ? 'none' : 'block';
 
   for (const address of state.history) {
-    const active = state.mailboxes.some((m) => m.address === address);
+    const mailbox = state.mailboxes.find((m) => m.address === address);
+    const active = Boolean(mailbox);
     const { local, domain } = splitAddress(address);
     const li = document.createElement('li');
     li.className = `history-item${address === state.currentAddress ? ' active' : ''}${active ? '' : ' stale'}`;
@@ -292,6 +397,7 @@ function renderHistory() {
       <span>
         <span class="local">${escapeHtml(local)}</span>
         <span class="domain">@${escapeHtml(domain)}</span>
+        ${providerTag(mailbox?.provider)}
       </span>
       ${active ? '' : '<span class="tag">expired</span>'}
       <button class="icon-btn" title="Forget" aria-label="Forget">✕</button>`;
@@ -318,6 +424,7 @@ async function deleteMailbox(address) {
       el.currentAddress.textContent = 'No address selected';
       renderMessages();
       renderMessageView(null);
+      renderProviderNotice(null);
       tickTtl();
     }
     await refreshMailboxes();
@@ -327,6 +434,23 @@ async function deleteMailbox(address) {
   }
 }
 
+function renderProviderNotice(mailbox) {
+  if (!mailbox || !mailbox.provider || mailbox.provider === 'selfhosted') {
+    el.providerNotice.hidden = true;
+    el.providerNotice.textContent = '';
+    return;
+  }
+
+  const provider = providerById(mailbox.provider);
+  const caps = provider?.capabilities || {};
+  const retention = caps.retentionMinutes || 60;
+  el.providerNotice.hidden = false;
+  el.providerNotice.innerHTML = `
+    <strong>${escapeHtml(provider?.label || mailbox.provider)}</strong>
+    <span>Third-party inbox. Mail is kept for about ${escapeHtml(retention)} minutes, is not
+    operated by this app and is not under its control.</span>`;
+}
+
 async function selectMailbox(address) {
   state.currentAddress = address;
   state.currentMessageId = null;
@@ -334,6 +458,7 @@ async function selectMailbox(address) {
   el.currentAddress.textContent = address;
   el.copyBtn.disabled = false;
   el.qrBtn.disabled = false;
+  renderProviderNotice(mailbox || null);
   renderMailboxes();
   renderTabs();
   renderHistory();
@@ -466,6 +591,14 @@ function updateExtendAvailability() {
     el.extendBtn.disabled = true;
     return;
   }
+
+  const caps = providerCapabilities(mailbox.provider);
+  if (caps.supportsExtend === false) {
+    el.extendBtn.disabled = true;
+    el.extendBtn.title = `${providerLabel(mailbox.provider)} inboxes cannot be extended`;
+    return;
+  }
+
   const hardCap = mailbox.createdAt + state.maxMailboxLifetimeMinutes * 60000;
   el.extendBtn.disabled = mailbox.expiresAt >= hardCap - 1000;
   el.extendBtn.title = el.extendBtn.disabled
@@ -539,6 +672,7 @@ function connectSocket() {
         el.qrBtn.disabled = true;
         renderMessages();
         renderMessageView(null);
+        renderProviderNotice(null);
         setStatus('This address expired and was cleaned up.', 'error');
       }
       renderMailboxes();
