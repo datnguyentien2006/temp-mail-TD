@@ -397,14 +397,17 @@ export function createResendProvider({ store, config, client, logger = console }
     },
 
     /**
-     * Fire-and-forget startup probe: a bogus id makes Resend answer 404 when
-     * the key is usable, or 401/403 when it is not (e.g. a sending-only key).
-     * A 404 does not count against the quota. Transient errors are ignored.
+     * Fire-and-forget startup probe: a syntactically valid but non-existent
+     * UUID makes Resend answer 404 when the key is usable, or 401/403 when it
+     * is not (e.g. a sending-only key). A 404 does not count against the quota.
+     * Transient errors are ignored.
      */
     async checkCredentials() {
       if (!cfg.enabled || !cfg.apiKey) return { ok: false, reason: 'not-configured' };
       try {
-        await api.getReceivedEmail('startup-credential-check', { htmlFormat: 'data_uri' });
+        await api.getReceivedEmail('00000000-0000-0000-0000-000000000000', {
+          htmlFormat: 'data_uri',
+        });
         lastAuthError = null;
         return { ok: true };
       } catch (error) {

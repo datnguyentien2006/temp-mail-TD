@@ -590,7 +590,7 @@ test('checkCredentials probes the key out of band (404 = usable, 401 = rejected)
   // 404 for the bogus probe id means the key was accepted.
   const ok = await provider.checkCredentials();
   assert.equal(ok.ok, true);
-  assert.equal(fake.calls.at(-1).path, '/emails/receiving/startup-credential-check');
+  assert.equal(fake.calls.at(-1).path, '/emails/receiving/00000000-0000-0000-0000-000000000000');
 
   fake.fail = 401;
   const bad = await provider.checkCredentials();
