@@ -525,6 +525,9 @@ function renderMessages() {
   for (const msg of state.messages) {
     const li = document.createElement('li');
     li.className = `message${msg.id === state.currentMessageId ? ' active' : ''}`;
+    li.tabIndex = 0;
+    li.setAttribute('role', 'button');
+    li.setAttribute('aria-label', `Open message: ${msg.subject || '(no subject)'}`);
     li.innerHTML = `
       <div class="from">${escapeHtml(msg.from)}</div>
       <div class="subject">${escapeHtml(msg.subject)}</div>
@@ -533,6 +536,12 @@ function renderMessages() {
         <span>${msg.attachmentCount ? `<span class="badge">📎 ${msg.attachmentCount}</span>` : ''}</span>
       </div>`;
     li.addEventListener('click', () => openMessage(msg.id));
+    li.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openMessage(msg.id);
+      }
+    });
     el.messageList.appendChild(li);
   }
 }
@@ -565,8 +574,10 @@ function renderMessageView(msg) {
     ? `<div class="attachments"><strong>Attachments:</strong><ul>${attachments
         .map((a) => {
           const suffix = `(${escapeHtml(a.contentType)}, ${a.size} B)`;
+          // The attachment route needs the session header, which a plain link
+          // navigation cannot send, so the click is intercepted and fetched.
           return canDownload
-            ? `<li><a href="/api/mailboxes/${encodeURIComponent(state.currentAddress)}/messages/${msg.id}/attachments/${a.index}">${escapeHtml(a.filename)}</a> ${suffix}</li>`
+            ? `<li><a class="attachment-link" href="/api/mailboxes/${encodeURIComponent(state.currentAddress)}/messages/${msg.id}/attachments/${a.index}" data-filename="${escapeHtml(a.filename)}">${escapeHtml(a.filename)}</a> ${suffix}</li>`
             : `<li>${escapeHtml(a.filename)} ${suffix} <span class="tag">metadata only</span></li>`;
         })
         .join('')}</ul></div>`
@@ -611,6 +622,12 @@ function renderMessageView(msg) {
     ${attachmentHtml}`;
 
   const host = el.messageView.querySelector('#bodyHost');
+  for (const link of el.messageView.querySelectorAll('.attachment-link')) {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      downloadAttachment(link.getAttribute('href'), link.dataset.filename);
+    });
+  }
   if (msg.html) {
     const iframe = document.createElement('iframe');
     // Scripts and same-origin access stay disabled. We only allow links to
@@ -632,6 +649,31 @@ function renderMessageView(msg) {
     const pre = document.createElement('pre');
     pre.textContent = msg.text || '(empty message)';
     host.appendChild(pre);
+  }
+}
+
+/* ---------------------------------------------------------- attachments */
+async function downloadAttachment(href, filename) {
+  setStatus('Downloading attachment...');
+  try {
+    const response = await fetch(href, { headers: { 'x-session-id': state.sessionId } });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || `Download failed (${response.status}).`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename || 'attachment';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // Give the browser a tick to start the save before the blob is released.
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setStatus(`Downloaded ${filename || 'attachment'}.`, 'ok');
+  } catch (err) {
+    setStatus(err.message, 'error');
   }
 }
 

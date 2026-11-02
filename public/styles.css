@@ -213,6 +213,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .message { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .message:hover { background: var(--panel-2); }
 .message.active { background: var(--panel-2); border-left: 3px solid var(--accent); }
+.message:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .message .from { font-weight: 600; font-size: 0.9rem; }
 .message .subject {
   font-size: 0.9rem;
