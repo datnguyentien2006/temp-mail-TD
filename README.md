@@ -1,27 +1,29 @@
 # Temp Mail
 
-A small, self-hosted **disposable email** web app with two interchangeable mailbox providers:
-its own inbound SMTP server on domains you own, and **Guerrilla Mail**'s public API. Generate
-throwaway addresses on demand and receive anything sent to them — straight into the browser.
+A small, self-hosted **disposable email** web app with three interchangeable mailbox providers:
+its own inbound SMTP server on domains you own, **Guerrilla Mail**'s public API, and **Resend
+inbound** (receive-only). Generate throwaway addresses on demand and receive anything sent to them —
+straight into the browser.
 
 ![status](https://img.shields.io/badge/tests-node%3Atest-brightgreen)
 
 ## Features
 
-- **Two mailbox providers** — a self-hosted SMTP provider on domains you own, and an optional
-  Guerrilla Mail provider. The picker is grouped by provider and driven by `GET /api/domains`;
-  nothing is hardcoded in the HTML.
+- **Three mailbox providers** — a self-hosted SMTP provider on domains you own, an optional
+  Guerrilla Mail provider, and an optional Resend provider (receive-only). The picker is grouped by
+  provider and driven by `GET /api/domains`; nothing is hardcoded in the HTML.
 - **Server-driven domain dropdown** — the self-hosted provider lists only the domains in `DOMAINS`
   (plus a **Random** option) and rejects anything else. Providers that cannot choose a domain show
-  a single **Random** entry instead of a fake list.
+  a single **Random** entry instead of a fake list; providers that are configured but temporarily
+  unusable (quota reached, missing credentials) are shown disabled rather than offering a dead option.
 - **One-click mailbox creation** — random local part on the chosen domain, or a custom local part
   (format/length validated, reserved names blocked, uniqueness enforced).
 - **Receive mail for real** — an inbound SMTP server accepts mail for the configured domains and
   stores it for the matching mailbox; the Guerrilla provider mirrors remote inboxes into the same
-  model.
+  model; the Resend provider ingests mail pushed by Resend's `email.received` webhook.
 - **Live inbox** — new mail is pushed over WebSocket; falls back to polling automatically at a
   configurable interval (`POLL_INTERVAL_MS`). Guerrilla has no push API, so the backend polls open
-  inboxes and then uses the same WebSocket.
+  inboxes and then uses the same WebSocket; Resend pushes a webhook and the backend fetches the body.
 - **Multiple inboxes** — keep several addresses open at once, switch with a tab/click and instant
   effect, delete any of them (cap: `MAX_MAILBOXES_PER_SESSION`).
 - **Recent-address history** — the last 20 addresses are remembered in `localStorage`; still-valid
@@ -32,7 +34,8 @@ throwaway addresses on demand and receive anything sent to them — straight int
   background cleanup job that also tells the UI when an address is gone.
 - **Safe HTML rendering** — HTML from either provider is sanitised server-side and rendered inside a
   sandboxed iframe (no scripts, no same-origin).
-- **Attachments** — self-hosted mail lists name/size/type and downloads on demand.
+- **Attachments** — self-hosted mail lists name/size/type and downloads on demand; Resend mail lists
+  metadata only (bytes are never fetched) and Guerrilla exposes none.
 - **Convenience** — copy-address button and an on-demand QR code for the active address.
 - **Hardening** — rate limiting on creation, strict input validation, no secrets in the repo.
 
@@ -67,7 +70,7 @@ throwaway addresses on demand and receive anything sent to them — straight int
 
 ### Provider abstraction
 
-`src/providers/index.js` registers interchangeable providers. Both implement the same surface:
+`src/providers/index.js` registers interchangeable providers. All implement the same surface:
 
 ```
 listDomains() · createMailbox() · listMailboxes() · getMailbox()
@@ -85,6 +88,15 @@ Each provider also exposes `capabilities` (`supportsDomainChoice`, `supportsCust
   and mirrors messages into the same store, so tabs/history/timer/WebSocket keep working.
 - `providers/guerrilla-client.js` — defensive HTTP client: User-Agent, timeout, global concurrency
   cap, minimum spacing between calls, exponential backoff, response shape checks.
+- `providers/resend.js` — **receive-only**. Mailboxes are virtual (no Resend API call on create);
+  mail arrives as a signed `email.received` webhook, the body is fetched over the receiving API,
+  sanitised and stored. There is no send/reply/forward path anywhere.
+- `providers/resend-client.js` — read-only client for the receiving API (mandatory `User-Agent`,
+  timeout, retries with backoff, `Retry-After`, 404→`null`, shape checks).
+- `providers/svix.js` — Svix-style webhook signature verification (`svix-id`/`svix-timestamp`/
+  `svix-signature`, HMAC-SHA256 over the raw body, replay window).
+- `providers/quota.js` — global daily/monthly counters so the Resend free-plan allowance is not
+  burned through, with a soft warning level.
 
 ### How a mailbox and its mail flow
 
@@ -106,6 +118,10 @@ Each provider also exposes `capabilities` (`supportsDomainChoice`, `supportsCust
    A conservative poller checks only open inboxes, maps remote list items into the same store, and
    the same WebSocket pushes new mail to the browser. `fetch_email` is called only when a message is
    opened; the body is sanitised exactly like self-hosted mail.
+9. **Resend:** the backend verifies the webhook signature over the raw body, drops unknown/expired
+   recipients silently (no per-address object exists on Resend), fetches the message body over the
+   receiving API once, and copies it into every matching mailbox. The body is sanitised like any
+   other mail. Attachment bytes are never downloaded — metadata only.
 
 ## Quick start (local dev)
 
@@ -161,6 +177,23 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `GUERRILLA_RETENTION_MINUTES` | `60` | Local lifetime for Guerrilla inboxes |
 | `GUERRILLA_API_BASE` | official endpoint | Override the API URL (testing/proxy) |
 | `GUERRILLA_USER_AGENT` | project UA | User-Agent sent to Guerrilla Mail |
+| `ENABLE_RESEND` | `true` | Kill switch for the Resend provider (also needs `RESEND_DOMAINS`) |
+| `RESEND_DOMAINS` | *(empty)* | Comma-separated domains verified for receiving in Resend. Empty ⇒ provider off |
+| `RESEND_API_KEY` | *(empty)* | Resend API key (**full access**); secret, never sent to clients |
+| `RESEND_WEBHOOK_SECRET` | *(empty)* | Signing secret of the receiving webhook (`whsec_…`); secret |
+| `RESEND_REQUEST_TIMEOUT_MS` | `10000` | Per-request timeout for the receiving API |
+| `RESEND_MAX_RETRIES` | `2` | Retries (exponential backoff) on 429/5xx/network errors |
+| `RESEND_RETRY_BASE_MS` | `500` | Base delay for the retry backoff |
+| `RESEND_SIGNATURE_TOLERANCE_MS` | `300000` | Reject webhooks older than this (replay protection; `0` disables) |
+| `RESEND_WEBHOOK_MAX_BYTES` | `1048576` | Webhook body size cap |
+| `RESEND_DEDUPE_TTL_MS` | `86400000` | How long a processed `email_id` is remembered |
+| `RESEND_DAILY_LIMIT` | `100` | Daily processing cap (free plan); reaching it pauses the provider |
+| `RESEND_MONTHLY_LIMIT` | `3000` | Monthly processing cap (free plan) |
+| `RESEND_SOFT_LIMIT_RATIO` | `0.8` | Fraction of a limit at which the provider is flagged degraded |
+| `RESEND_MAX_MESSAGES_PER_MAILBOX` | `50` | Per-mailbox stored-message cap |
+| `RESEND_MAX_MESSAGES_PER_SENDER` | `20` | Per-sender cap within one mailbox |
+| `RESEND_API_BASE` | `https://api.resend.com` | Override the API URL (testing/proxy) |
+| `RESEND_USER_AGENT` | project UA | User-Agent sent to Resend (required by their API) |
 
 ## Mailbox providers
 
@@ -181,10 +214,28 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
       "label": "Guerrilla Mail",
       "capabilities": { "supportsDomainChoice": false, "supportsExtend": false, "retentionMinutes": 60 },
       "domains": []
+    },
+    {
+      "id": "resend",
+      "label": "Resend",
+      "capabilities": {
+        "supportsDomainChoice": true,
+        "supportsExtend": true,
+        "supportsAttachments": false,
+        "liveUpdates": "webhook",
+        "retentionMinutes": 30
+      },
+      "domains": ["inbox.example.com"],
+      "status": { "available": true, "quota": { "daily": { "used": 3, "limit": 100 }, "monthly": { "used": 3, "limit": 3000 } } }
     }
   ]
 }
 ```
+
+Each provider entry also carries a `status` object. When a provider is configured but cannot be used
+right now (missing `RESEND_API_KEY`/`RESEND_WEBHOOK_SECRET`, or the daily/monthly quota is reached)
+`status.available` is `false` with a `reason`, and the UI shows it disabled instead of offering an
+option that cannot work.
 
 ### Guerrilla Mail provider
 
@@ -216,6 +267,36 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
   repeatedly making many requests. This implementation is deliberately conservative (default 15 s
   polling, 300 ms between calls, max 4 concurrent, exponential backoff) and only polls open inboxes.
   Review Guerrilla's terms before deploying at scale.
+
+### Resend provider (receive-only)
+
+- **Receive-only by design.** This provider never sends, replies or forwards. It is enabled by
+  default but stays hidden until you set at least one domain in `RESEND_DOMAINS`; set
+  `ENABLE_RESEND=false` to remove it entirely.
+- **How mail arrives.** Resend receives mail at a domain you verified (a custom domain with Resend's
+  MX record, or your account's `<id>.resend.app` subdomain) for **any** username, then fires an
+  `email.received` webhook. There is no per-address inbox object to create, so creating a mailbox
+  here is **virtual** — no Resend API call is made. The backend then fetches the body once over
+  `GET /emails/receiving/{id}` and stores it in every matching mailbox.
+- **Webhook endpoint:** `POST /api/webhooks/resend`. Point Resend's receiving webhook at
+  `https://<your-public-host>/api/webhooks/resend`. It is mounted **before** the JSON body parser so
+  the signature is verified over the raw bytes. Invalid/missing signatures are rejected with `401`
+  and never processed; non-`email.received` events are acknowledged and ignored; processing happens
+  after a `202` so Resend does not time out and retry.
+- **Required key permission:** `full_access`. A `sending_access` key cannot call the receiving
+  retrieve endpoint. Secrets (`RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`) live only in the environment
+  and are never logged or returned to clients.
+- **Unknown or expired recipients are dropped silently** — no bounce, no reveal. Duplicate webhooks
+  (same `email_id`) are processed once; a `svix-timestamp` outside
+  `RESEND_SIGNATURE_TOLERANCE_MS` is rejected (replay protection).
+- **Quota protection.** The free plan is **100/day, 3,000/month** (shared with sent mail, reset at
+  midnight UTC), and every received message counts. The provider keeps global counters, warns at
+  `RESEND_SOFT_LIMIT_RATIO`, and **stops processing** at the hard limit, marking itself unavailable
+  in the UI. Per-mailbox and per-sender caps add a second layer.
+- **Limitations:** attachments are metadata only (bytes are never downloaded), no domain selection
+  beyond the domains you configure, and the Resend free plan's retention is about 30 days while this
+  app keeps mail only for the mailbox lifetime. It is a third-party dependency: availability, quota
+  and content are outside this app's control.
 
 ## Configuring domains & DNS
 
@@ -257,18 +338,19 @@ All endpoints except `/api/health`, `/api/config` and `/api/domains` require the
 | `GET` | `/api/health` | Liveness probe |
 | `GET` | `/api/domains` | Grouped provider/domain descriptor plus the flat `domains` list (public; fills the UI picker) |
 | `GET` | `/api/config` | Domains, TTL, lifetime cap, per-session cap and polling interval (public) |
-| `POST` | `/api/mailboxes` | Create a mailbox. Body `{ provider?, domain?, localPart? }`. `provider` defaults to `selfhosted`; omit `domain` for a random self-hosted domain; omit it for Guerrilla (not selectable). `201` with the mailbox, `400` invalid, `409` taken, `429` rate/limit, `502` third-party failure |
+| `POST` | `/api/mailboxes` | Create a mailbox. Body `{ provider?, domain?, localPart? }`. `provider` defaults to `selfhosted`; omit `domain` for a random domain (self-hosted/Resend); omit it for Guerrilla (not selectable). `201` with the mailbox, `400` invalid, `409` taken, `429` rate/limit, `502` third-party failure, `503` provider temporarily unavailable |
 | `GET` | `/api/mailboxes` | List the session's mailboxes (all providers) |
-| `DELETE` | `/api/mailboxes/:address` | Delete a mailbox (Guerrilla: best-effort `forget_me`) |
-| `POST` | `/api/mailboxes/:address/extend` | Extend a **self-hosted** mailbox by one TTL (capped by `MAX_MAILBOX_LIFETIME_MINUTES`); `400` for Guerrilla |
+| `DELETE` | `/api/mailboxes/:address` | Delete a mailbox (Guerrilla: best-effort `forget_me`; Resend: local only) |
+| `POST` | `/api/mailboxes/:address/extend` | Extend a **self-hosted** or **Resend** mailbox by one TTL (capped by `MAX_MAILBOX_LIFETIME_MINUTES`); `400` for Guerrilla |
 | `GET` | `/api/mailboxes/:address/qr` | QR code for the address as an SVG data URL (any provider) |
 | `GET` | `/api/mailboxes/:address/messages` | List message summaries (syncs Guerrilla inboxes first) |
 | `GET` | `/api/mailboxes/:address/messages/:id` | Full message (sanitised HTML + text; fetches the Guerrilla body on demand) |
-| `DELETE` | `/api/mailboxes/:address/messages/:id` | Delete a message (also removes it remotely for Guerrilla) |
-| `GET` | `/api/mailboxes/:address/messages/:id/attachments/:index` | Download a **self-hosted** attachment; `400` for Guerrilla |
+| `DELETE` | `/api/mailboxes/:address/messages/:id` | Delete a message (also removes it remotely for Guerrilla; Resend: local only) |
+| `GET` | `/api/mailboxes/:address/messages/:id/attachments/:index` | Download a **self-hosted** attachment; `400` for Guerrilla and Resend |
+| `POST` | `/api/webhooks/resend` | Resend inbound webhook (`email.received`). Signature-verified over the raw body; not session-authenticated |
 
-Every mailbox object includes `provider: "selfhosted" | "guerrilla"`. Secrets (`sid_token`,
-`providerData`) are never serialised.
+Every mailbox object includes `provider: "selfhosted" | "guerrilla" | "resend"`. Secrets (`sid_token`,
+`providerData`, the Resend API key and webhook secret) are never serialised.
 
 WebSocket: `ws://host/ws?sessionId=<session>` — server pushes
 `{type:"message",address,message}`, `{type:"extended",address,expiresAt}` and
@@ -286,6 +368,11 @@ curl -s -X POST http://localhost:3000/api/mailboxes \
 curl -s -X POST http://localhost:3000/api/mailboxes \
   -H 'content-type: application/json' -H 'x-session-id: demo-session-1234' \
   -d '{"provider":"guerrilla","localPart":"hello"}'
+
+# Resend address on a domain you verified for receiving (virtual; no API call)
+curl -s -X POST http://localhost:3000/api/mailboxes \
+  -H 'content-type: application/json' -H 'x-session-id: demo-session-1234' \
+  -d '{"provider":"resend","domain":"inbox.example.com","localPart":"hello"}'
 ```
 
 ## Testing
@@ -307,13 +394,23 @@ de-duplication, HTML sanitisation, `fetch_email === false`, expired-session re-r
 cached responses, active-inbox-only polling, unsupported extend/attachments, delete/forget, and
 third-party failure handling.
 
+Resend tests (`test/resend.test.js`) use a **mocked receiving client and an in-memory fake store** —
+no request ever leaves the process. They cover the enable/configure gating, the unavailable status,
+virtual mailbox creation and validation, **signature verification over the raw body** (good,
+tampered, stale, re-serialised and multi-candidate), non-`email.received` and disabled-provider
+behaviour, silent dropping of unknown/expired recipients, de-duplication, HTML sanitisation with an
+XSS payload, multi-recipient fan-out, session isolation, quota hard/soft limits and rollover,
+per-mailbox/per-sender caps, client status mapping (404→null, 429/401/timeout), and that the client
+exposes read endpoints only.
+
 ## Provenance
 
 This project is an original, self-hosted implementation. It contains **no** copied code, CSS, text or
 assets from other temp-mail projects. The optional Guerrilla Mail provider uses **Guerrilla Mail's
-official public API** to create and read inboxes on their domains; the self-hosted provider only ever
-accepts mail for the domains you configure in `DOMAINS`. No look-alike or typosquatted domains are
-used.
+official public API** to create and read inboxes on their domains; the optional Resend provider uses
+**Resend's official receiving API and webhooks** on domains you verified with Resend; the self-hosted
+provider only ever accepts mail for the domains you configure in `DOMAINS`. No look-alike or
+typosquatted domains are used.
 
 ## Deployment notes
 
@@ -341,6 +438,12 @@ used.
 
    Run with `-p 3000:3000 -p 25:25 --env-file .env`.
 
+> **Resend provider:** besides inbound port 25, Resend needs to reach your app over **public HTTPS**
+> at `https://<your-public-host>/api/webhooks/resend` (use the reverse proxy in step 4, or a tunnel
+> such as ngrok / VS Code port forwarding for local testing). Set `RESEND_DOMAINS`,
+> `RESEND_API_KEY` and `RESEND_WEBHOOK_SECRET`, then add the receiving webhook in the Resend
+> dashboard.
+
 ## Security
 
 - HTML email is sanitised with an allow-list **and** rendered in a sandboxed iframe (`sandbox=""`),
@@ -351,6 +454,12 @@ used.
 - The API is session-scoped: you can only read/delete your own mailboxes.
 - Guerrilla `sid_token`s are stored server-side on that mailbox and are never serialised, logged or
   placed in URLs; only the backend talks to the Guerrilla API.
+- Resend webhooks are verified with an HMAC-SHA256 signature over the **raw** body before anything is
+  processed; a missing/invalid signature is a `401`, a stale `svix-timestamp` is rejected (replay
+  protection), and duplicate `email_id`s are processed once. The `RESEND_API_KEY` and
+  `RESEND_WEBHOOK_SECRET` are backend-only and never serialised, logged or returned.
+- Resend mail is **receive-only**: there is no send/reply/forward/draft code path in the client or the
+  provider, so a leaked key cannot be used by this app to send mail.
 - Secrets live only in `.env` (git-ignored); `.env.example` documents everything.
 
 ## Known limitations / next steps
@@ -371,6 +480,12 @@ used.
   are outside this app's control; read their terms before relying on it.
 - **Guerrilla polling is in-process** — with multiple instances each would poll independently. Run a
   single instance or share the poller/cache before scaling out.
+- **Resend is a third-party dependency** — receive-only, attachment bytes are never downloaded
+  (metadata only), domain choice is limited to the domains you configure, and the free plan is small
+  (100/day, 3,000/month, shared with sent mail). Processing pauses at the configured quota.
+- **Resend quota counters are in-process** — with multiple instances each keeps its own counters and
+  could collectively exceed the account allowance. Run a single instance or share the counters before
+  scaling out.
 
 ## License
 
